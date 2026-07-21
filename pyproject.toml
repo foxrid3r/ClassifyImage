@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "classify-image"
+version = "0.1.0"
+description = "A desktop GUI for manually classifying images into folders."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "Pillow>=10.0,<12",
+    "sv-ttk>=2.6,<3",
+]
+
+[project.gui-scripts]
+classify-image = "classify_image.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
