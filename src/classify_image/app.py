@@ -73,7 +73,7 @@ class ImageClassifierApp:
 
     def _create_widgets(self) -> None:
         file_manage_frame = ttk.Frame(self.root)
-        file_manage_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+        file_manage_frame.pack(padx=10, pady=(10, 5))
 
         ttk.Button(file_manage_frame, text="Select Folder", command=self.select_folder).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(file_manage_frame, text="Define Classes", command=self.define_classes).pack(side=tk.LEFT, padx=5)
@@ -108,7 +108,7 @@ class ImageClassifierApp:
         )
 
         file_and_class_frame = ttk.Frame(self.root)
-        file_and_class_frame.pack(fill=tk.X, padx=10, pady=5)
+        file_and_class_frame.pack(padx=10, pady=5)
 
         self.filename_label = ttk.Label(file_and_class_frame, text="", font=("Segoe UI", 11))
         self.filename_label.pack(side=tk.LEFT, padx=(0, 10))
