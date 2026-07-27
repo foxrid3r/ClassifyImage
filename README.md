@@ -17,6 +17,8 @@ ClassifyImage is a small desktop GUI for manually reviewing images, assigning ea
 - Move classified images into class-named subfolders.
 - Warn before overwriting an existing destination filename.
 
+![ClassifyImage demonstration](docs/assets/classify-image-demo.gif)
+
 ## Requirements
 
 - Python 3.10 or newer
