@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import tkinter as tk
+from io import BytesIO
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -12,6 +13,31 @@ from PIL import Image, ImageTk
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 MAX_CLASSES = 10
 MIN_PLAY_DELAY_MS = 10
+
+
+def fitted_size(image_size: tuple[int, int], viewport_size: tuple[int, int]) -> tuple[int, int]:
+    """Return the largest aspect-ratio-preserving size contained by a viewport."""
+    image_width, image_height = image_size
+    viewport_width, viewport_height = viewport_size
+    if viewport_width * image_height <= viewport_height * image_width:
+        return viewport_width, max(1, image_height * viewport_width // image_width)
+    return max(1, image_width * viewport_height // image_height), viewport_height
+
+
+def matching_svg_path(image_path: Path) -> Path | None:
+    """Find a same-directory SVG whose stem matches the image stem."""
+    expected_name = f"{image_path.stem}.svg".casefold()
+    try:
+        return next(
+            (
+                candidate
+                for candidate in image_path.parent.iterdir()
+                if candidate.is_file() and candidate.name.casefold() == expected_name
+            ),
+            None,
+        )
+    except OSError:
+        return None
 
 
 class ImageClassifierApp:
@@ -36,7 +62,9 @@ class ImageClassifierApp:
         self.start_y = 0
 
         self.image: Image.Image | None = None
+        self.overlay: Image.Image | None = None
         self.photo: ImageTk.PhotoImage | None = None
+        self.overlay_enabled = tk.BooleanVar(value=True)
         self.is_playing = False
         self.play_delay_ms = 1000
         self.play_after_id: str | None = None
@@ -54,6 +82,12 @@ class ImageClassifierApp:
             text="Move Classified Images",
             command=self.move_classified_images,
         ).pack(side=tk.LEFT, padx=5)
+        ttk.Checkbutton(
+            file_manage_frame,
+            text="Show SVG Overlay",
+            variable=self.overlay_enabled,
+            command=self.update_canvas,
+        ).pack(side=tk.LEFT, padx=(15, 5))
 
         self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -65,7 +99,7 @@ class ImageClassifierApp:
         self.canvas.bind("<Configure>", lambda _event: self.update_canvas())
 
         self.classification_frame = ttk.Frame(self.root)
-        self.classification_frame.pack(fill=tk.X, padx=10, pady=5)
+        self.classification_frame.pack(padx=10, pady=5)
 
         self.btn_remove_classification = ttk.Button(
             self.classification_frame,
@@ -83,7 +117,7 @@ class ImageClassifierApp:
         self.status_label.pack(side=tk.LEFT)
 
         controls_frame = ttk.Frame(self.root)
-        controls_frame.pack(fill=tk.X, padx=10, pady=(5, 10))
+        controls_frame.pack(padx=10, pady=(5, 10))
 
         ttk.Label(controls_frame, text="Delay (ms)").pack(side=tk.LEFT)
         self.delay_entry = ttk.Entry(controls_frame, width=7)
@@ -145,6 +179,7 @@ class ImageClassifierApp:
             messagebox.showerror("Image Error", f"Failed to open image:\n{image_path}\n\n{exc}")
             return
 
+        self._load_overlay(image_path)
         self.update_canvas()
         self.filename_label.config(text=image_path.name)
 
@@ -168,6 +203,7 @@ class ImageClassifierApp:
 
     def _clear_image_display(self) -> None:
         self.image = None
+        self.overlay = None
         self.photo = None
         self.canvas.delete("all")
         self.filename_label.config(text="")
@@ -175,23 +211,45 @@ class ImageClassifierApp:
         self.index_var.set("0")
         self.total_label.config(text="/ 0")
 
+    def _load_overlay(self, image_path: Path) -> None:
+        self.overlay = None
+        overlay_path = matching_svg_path(image_path)
+        if overlay_path is None:
+            return
+
+        assert self.image is not None
+        try:
+            import cairosvg
+
+            svg_png = cairosvg.svg2png(
+                url=os.fspath(overlay_path),
+                output_width=self.image.width,
+                output_height=self.image.height,
+            )
+            with Image.open(BytesIO(svg_png)) as overlay_image:
+                self.overlay = overlay_image.convert("RGBA").copy()
+        except Exception as exc:
+            messagebox.showwarning(
+                "SVG Overlay Error",
+                f"Failed to load overlay:\n{overlay_path}\n\n{exc}",
+            )
+
     def update_canvas(self) -> None:
         if self.image is None:
             return
 
         canvas_width = max(self.canvas.winfo_width(), 1)
         canvas_height = max(self.canvas.winfo_height(), 1)
-        image_width, image_height = self.image.size
-        aspect_ratio = image_width / image_height
+        fit_width, fit_height = fitted_size(self.image.size, (canvas_width, canvas_height))
+        new_width = max(1, int(fit_width * self.zoom_factor))
+        new_height = max(1, int(fit_height * self.zoom_factor))
 
-        if canvas_width / canvas_height > aspect_ratio:
-            new_height = max(1, int(canvas_height * self.zoom_factor))
-            new_width = max(1, int(new_height * aspect_ratio))
-        else:
-            new_width = max(1, int(canvas_width * self.zoom_factor))
-            new_height = max(1, int(new_width / aspect_ratio))
-
-        resized_image = self.image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        # Nearest-neighbor scaling keeps source pixels as hard-edged blocks.
+        resized_image = self.image.resize((new_width, new_height), Image.Resampling.NEAREST)
+        if self.overlay is not None and self.overlay_enabled.get():
+            resized_overlay = self.overlay.resize((new_width, new_height), Image.Resampling.NEAREST)
+            resized_image = resized_image.convert("RGBA")
+            resized_image.alpha_composite(resized_overlay)
         self.photo = ImageTk.PhotoImage(resized_image)
 
         center_x = self.offset_x + canvas_width // 2
@@ -346,13 +404,20 @@ class ImageClassifierApp:
             source = self.folder_path / filename
             destination_dir = self.folder_path / classification
             destination = destination_dir / filename
+            overlay_source = matching_svg_path(source)
+            overlay_destination = destination_dir / overlay_source.name if overlay_source is not None else None
 
             try:
                 destination_dir.mkdir(parents=True, exist_ok=True)
                 if destination.exists():
                     failures.append(f"{filename}: destination already exists")
                     continue
+                if overlay_destination is not None and overlay_destination.exists():
+                    failures.append(f"{filename}: SVG overlay destination already exists")
+                    continue
                 shutil.move(os.fspath(source), os.fspath(destination))
+                if overlay_source is not None and overlay_destination is not None:
+                    shutil.move(os.fspath(overlay_source), os.fspath(overlay_destination))
                 moved_count += 1
             except OSError as exc:
                 failures.append(f"{filename}: {exc}")

@@ -9,7 +9,9 @@ ClassifyImage is a small desktop GUI for manually reviewing images, assigning ea
 - Classify with buttons or number keys `1` through `9`.
 - Automatically advance after classification.
 - Navigate with the left and right arrow keys.
-- Zoom with the mouse wheel and pan by dragging.
+- Fit each image to the viewing window by default.
+- Zoom with the mouse wheel and pan by dragging, using pixel-preserving nearest-neighbor scaling.
+- Automatically display an optional same-named SVG overlay (for example, `photo.svg` over `photo.png`).
 - Play images automatically with a configurable delay.
 - Move classified images into class-named subfolders.
 - Warn before overwriting an existing destination filename.
@@ -25,7 +27,7 @@ ClassifyImage is a small desktop GUI for manually reviewing images, assigning ea
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 py -m pip install --upgrade pip
-pip install -r requirements.txt
+pip install -e .
 ```
 
 ## Run
@@ -50,7 +52,7 @@ You can also run the included launcher:
 ## Development
 
 ```powershell
-pip install -r requirements-dev.txt
+pip install -e ".[dev]"
 ruff check .
 pytest
 ```
@@ -69,8 +71,6 @@ ClassifyImage/
 ├── .gitignore
 ├── LICENSE
 ├── pyproject.toml
-├── requirements.txt
-├── requirements-dev.txt
 ├── run.ps1
 └── README.md
 ```
