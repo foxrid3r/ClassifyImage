@@ -3,9 +3,11 @@ from __future__ import annotations
 import os
 import shutil
 import tkinter as tk
+from collections import OrderedDict
 from io import BytesIO
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from xml.etree import ElementTree
 
 from PIL import Image, ImageTk
 
@@ -40,6 +42,23 @@ def matching_svg_path(image_path: Path) -> Path | None:
         return None
 
 
+def svg_with_line_width(svg_path: Path, line_width: float) -> bytes:
+    """Return SVG data with uniform geometry strokes and proportional markers."""
+    root = ElementTree.parse(svg_path).getroot()
+    namespace = root.tag.partition("}")[0].removeprefix("{") if "}" in root.tag else ""
+    style_tag = f"{{{namespace}}}style" if namespace else "style"
+    style = ElementTree.Element(style_tag, {"type": "text/css"})
+    style.text = (
+        "path, line, polyline, polygon, rect, circle, ellipse "
+        f"{{ stroke-width: {line_width:g} !important; }}"
+    )
+    root.insert(0, style)
+    marker_tag = f"{{{namespace}}}marker" if namespace else "marker"
+    for marker in root.iter(marker_tag):
+        marker.set("markerUnits", "strokeWidth")
+    return ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
 class ImageClassifierApp:
     """Tkinter GUI for interactively sorting images into class folders."""
 
@@ -62,9 +81,12 @@ class ImageClassifierApp:
         self.start_y = 0
 
         self.image: Image.Image | None = None
-        self.overlay: Image.Image | None = None
+        self.overlay_path: Path | None = None
+        self.overlay_cache: OrderedDict[tuple[int, int], ImageTk.PhotoImage] = OrderedDict()
         self.photo: ImageTk.PhotoImage | None = None
         self.overlay_enabled = tk.BooleanVar(value=True)
+        self.overlay_line_width = 1.0
+        self.overlay_line_width_var = tk.StringVar(value="1")
         self.is_playing = False
         self.play_delay_ms = 1000
         self.play_after_id: str | None = None
@@ -88,6 +110,19 @@ class ImageClassifierApp:
             variable=self.overlay_enabled,
             command=self.update_canvas,
         ).pack(side=tk.LEFT, padx=(15, 5))
+        ttk.Label(file_manage_frame, text="Line width").pack(side=tk.LEFT, padx=(10, 5))
+        self.overlay_line_width_spinbox = ttk.Spinbox(
+            file_manage_frame,
+            from_=0.1,
+            to=100.0,
+            increment=0.5,
+            width=5,
+            textvariable=self.overlay_line_width_var,
+            command=self.set_overlay_line_width,
+        )
+        self.overlay_line_width_spinbox.pack(side=tk.LEFT)
+        self.overlay_line_width_spinbox.bind("<Return>", self.set_overlay_line_width)
+        self.overlay_line_width_spinbox.bind("<FocusOut>", self.set_overlay_line_width)
 
         self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -203,7 +238,8 @@ class ImageClassifierApp:
 
     def _clear_image_display(self) -> None:
         self.image = None
-        self.overlay = None
+        self.overlay_path = None
+        self.overlay_cache.clear()
         self.photo = None
         self.canvas.delete("all")
         self.filename_label.config(text="")
@@ -212,27 +248,55 @@ class ImageClassifierApp:
         self.total_label.config(text="/ 0")
 
     def _load_overlay(self, image_path: Path) -> None:
-        self.overlay = None
-        overlay_path = matching_svg_path(image_path)
-        if overlay_path is None:
-            return
+        self.overlay_path = matching_svg_path(image_path)
+        self.overlay_cache.clear()
+
+    def _get_rendered_overlay(self, size: tuple[int, int]) -> ImageTk.PhotoImage | None:
+        if self.overlay_path is None:
+            return None
+        if size in self.overlay_cache:
+            self.overlay_cache.move_to_end(size)
+            return self.overlay_cache[size]
 
         assert self.image is not None
         try:
             import cairosvg
 
             svg_png = cairosvg.svg2png(
-                url=os.fspath(overlay_path),
-                output_width=self.image.width,
-                output_height=self.image.height,
+                bytestring=svg_with_line_width(self.overlay_path, self.overlay_line_width),
+                output_width=size[0],
+                output_height=size[1],
             )
             with Image.open(BytesIO(svg_png)) as overlay_image:
-                self.overlay = overlay_image.convert("RGBA").copy()
+                rendered_overlay = ImageTk.PhotoImage(overlay_image.convert("RGBA"), master=self.root)
         except Exception as exc:
             messagebox.showwarning(
                 "SVG Overlay Error",
-                f"Failed to load overlay:\n{overlay_path}\n\n{exc}",
+                f"Failed to load overlay:\n{self.overlay_path}\n\n{exc}",
             )
+            self.overlay_path = None
+            self.overlay_cache.clear()
+            return None
+
+        self.overlay_cache[size] = rendered_overlay
+        if len(self.overlay_cache) > 8:
+            self.overlay_cache.popitem(last=False)
+        return rendered_overlay
+
+    def set_overlay_line_width(self, _event: tk.Event | None = None) -> None:
+        try:
+            line_width = float(self.overlay_line_width_var.get())
+            if line_width <= 0:
+                raise ValueError
+        except ValueError:
+            self.overlay_line_width_var.set(f"{self.overlay_line_width:g}")
+            return
+
+        if line_width == self.overlay_line_width:
+            return
+        self.overlay_line_width = line_width
+        self.overlay_cache.clear()
+        self.update_canvas()
 
     def update_canvas(self) -> None:
         if self.image is None:
@@ -246,10 +310,6 @@ class ImageClassifierApp:
 
         # Nearest-neighbor scaling keeps source pixels as hard-edged blocks.
         resized_image = self.image.resize((new_width, new_height), Image.Resampling.NEAREST)
-        if self.overlay is not None and self.overlay_enabled.get():
-            resized_overlay = self.overlay.resize((new_width, new_height), Image.Resampling.NEAREST)
-            resized_image = resized_image.convert("RGBA")
-            resized_image.alpha_composite(resized_overlay)
         self.photo = ImageTk.PhotoImage(resized_image)
 
         center_x = self.offset_x + canvas_width // 2
@@ -257,6 +317,10 @@ class ImageClassifierApp:
 
         self.canvas.delete("all")
         self.canvas.create_image(center_x, center_y, image=self.photo, anchor=tk.CENTER)
+        if self.overlay_enabled.get():
+            rendered_overlay = self._get_rendered_overlay((new_width, new_height))
+            if rendered_overlay is not None:
+                self.canvas.create_image(center_x, center_y, image=rendered_overlay, anchor=tk.CENTER)
 
         if self.images[self.current_index] in self.classified_map:
             self.canvas.create_rectangle(

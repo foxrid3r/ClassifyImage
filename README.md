@@ -12,6 +12,7 @@ ClassifyImage is a small desktop GUI for manually reviewing images, assigning ea
 - Fit each image to the viewing window by default.
 - Zoom with the mouse wheel and pan by dragging, using pixel-preserving nearest-neighbor scaling.
 - Automatically display an optional same-named SVG overlay (for example, `photo.svg` over `photo.png`).
+- Set one global line width for all stroked geometry, with proportionally scaled SVG markers and arrowheads.
 - Play images automatically with a configurable delay.
 - Move classified images into class-named subfolders.
 - Warn before overwriting an existing destination filename.
