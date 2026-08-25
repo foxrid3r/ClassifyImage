@@ -4,13 +4,14 @@ import os
 import shutil
 import tkinter as tk
 from collections import OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import wait as wait_for_futures
 from io import BytesIO
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from xml.etree import ElementTree
 
 from PIL import Image, ImageTk
-
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 MAX_CLASSES = 10
@@ -48,10 +49,7 @@ def svg_with_line_width(svg_path: Path, line_width: float) -> bytes:
     namespace = root.tag.partition("}")[0].removeprefix("{") if "}" in root.tag else ""
     style_tag = f"{{{namespace}}}style" if namespace else "style"
     style = ElementTree.Element(style_tag, {"type": "text/css"})
-    style.text = (
-        "path, line, polyline, polygon, rect, circle, ellipse "
-        f"{{ stroke-width: {line_width:g} !important; }}"
-    )
+    style.text = f"path, line, polyline, polygon, rect, circle, ellipse {{ stroke-width: {line_width:g} !important; }}"
     root.insert(0, style)
     marker_tag = f"{{{namespace}}}marker" if namespace else "marker"
     for marker in root.iter(marker_tag):
@@ -73,6 +71,7 @@ class ImageClassifierApp:
         self.current_index = 0
         self.classifications: list[str] = []
         self.classified_map: dict[str, str] = {}
+        self.overlay_paths: dict[str, Path] = {}
 
         self.zoom_factor = 1.0
         self.offset_x = 0
@@ -81,6 +80,7 @@ class ImageClassifierApp:
         self.start_y = 0
 
         self.image: Image.Image | None = None
+        self.rendered_image_cache: tuple[tuple[int, int], ImageTk.PhotoImage] | None = None
         self.overlay_path: Path | None = None
         self.overlay_cache: OrderedDict[tuple[int, int], ImageTk.PhotoImage] = OrderedDict()
         self.photo: ImageTk.PhotoImage | None = None
@@ -90,6 +90,8 @@ class ImageClassifierApp:
         self.is_playing = False
         self.play_delay_ms = 1000
         self.play_after_id: str | None = None
+        self.image_loader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="image-loader")
+        self.prefetched_images: dict[Path, Future[Image.Image]] = {}
 
         self._create_widgets()
 
@@ -132,6 +134,9 @@ class ImageClassifierApp:
         self.canvas.bind("<ButtonPress-1>", self.start_pan)
         self.canvas.bind("<B1-Motion>", self.pan_image)
         self.canvas.bind("<Configure>", lambda _event: self.update_canvas())
+
+        self.directory_label = ttk.Label(self.root, text="No folder selected", anchor=tk.W)
+        self.directory_label.pack(fill=tk.X, padx=10, pady=(0, 5))
 
         self.classification_frame = ttk.Frame(self.root)
         self.classification_frame.pack(padx=10, pady=5)
@@ -183,7 +188,9 @@ class ImageClassifierApp:
             return
 
         self.stop_playback()
+        self._clear_prefetch()
         self.folder_path = Path(folder_selected)
+        self.directory_label.config(text=f"{self.folder_path}")
         self.load_images()
         self.reset_view()
         self.show_image()
@@ -193,13 +200,31 @@ class ImageClassifierApp:
             self.images = []
             return
 
-        self.images = sorted(
-            path.name
-            for path in self.folder_path.iterdir()
-            if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS
-        )
+        paths = [path for path in self.folder_path.iterdir() if path.is_file()]
+        self.images = sorted(path.name for path in paths if path.suffix.lower() in SUPPORTED_EXTENSIONS)
+        self.overlay_paths = {path.stem.casefold(): path for path in paths if path.suffix.casefold() == ".svg"}
         self.current_index = 0
         self.classified_map.clear()
+
+    @staticmethod
+    def _open_image(image_path: Path) -> Image.Image:
+        with Image.open(image_path) as source_image:
+            return source_image.copy()
+
+    def _clear_prefetch(self, *, wait: bool = False) -> None:
+        futures = list(self.prefetched_images.values())
+        for future in futures:
+            future.cancel()
+        if wait:
+            wait_for_futures(futures)
+        self.prefetched_images.clear()
+
+    def _prefetch_next_image(self) -> None:
+        if self.folder_path is None or self.current_index >= len(self.images) - 1:
+            return
+        next_path = self.folder_path / self.images[self.current_index + 1]
+        if next_path not in self.prefetched_images:
+            self.prefetched_images[next_path] = self.image_loader.submit(self._open_image, next_path)
 
     def show_image(self) -> None:
         if not self.images or self.folder_path is None:
@@ -208,12 +233,13 @@ class ImageClassifierApp:
 
         image_path = self.folder_path / self.images[self.current_index]
         try:
-            with Image.open(image_path) as source_image:
-                self.image = source_image.copy()
+            future = self.prefetched_images.pop(image_path, None)
+            self.image = future.result() if future is not None else self._open_image(image_path)
         except (OSError, ValueError) as exc:
             messagebox.showerror("Image Error", f"Failed to open image:\n{image_path}\n\n{exc}")
             return
 
+        self.rendered_image_cache = None
         self._load_overlay(image_path)
         self.update_canvas()
         self.filename_label.config(text=image_path.name)
@@ -235,9 +261,26 @@ class ImageClassifierApp:
 
         self.index_var.set(str(self.current_index + 1))
         self.total_label.config(text=f"/ {len(self.images)}")
+        self._clear_unneeded_prefetch()
+        self._prefetch_next_image()
+
+    def _clear_unneeded_prefetch(self) -> None:
+        if self.folder_path is None:
+            self._clear_prefetch()
+            return
+        wanted = (
+            self.folder_path / self.images[self.current_index + 1]
+            if self.current_index < len(self.images) - 1
+            else None
+        )
+        for path, future in list(self.prefetched_images.items()):
+            if path != wanted:
+                future.cancel()
+                del self.prefetched_images[path]
 
     def _clear_image_display(self) -> None:
         self.image = None
+        self.rendered_image_cache = None
         self.overlay_path = None
         self.overlay_cache.clear()
         self.photo = None
@@ -248,7 +291,7 @@ class ImageClassifierApp:
         self.total_label.config(text="/ 0")
 
     def _load_overlay(self, image_path: Path) -> None:
-        self.overlay_path = matching_svg_path(image_path)
+        self.overlay_path = self.overlay_paths.get(image_path.stem.casefold())
         self.overlay_cache.clear()
 
     def _get_rendered_overlay(self, size: tuple[int, int]) -> ImageTk.PhotoImage | None:
@@ -269,7 +312,7 @@ class ImageClassifierApp:
             )
             with Image.open(BytesIO(svg_png)) as overlay_image:
                 rendered_overlay = ImageTk.PhotoImage(overlay_image.convert("RGBA"), master=self.root)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- CairoSVG can surface backend-specific exceptions.
             messagebox.showwarning(
                 "SVG Overlay Error",
                 f"Failed to load overlay:\n{self.overlay_path}\n\n{exc}",
@@ -309,8 +352,11 @@ class ImageClassifierApp:
         new_height = max(1, int(fit_height * self.zoom_factor))
 
         # Nearest-neighbor scaling keeps source pixels as hard-edged blocks.
-        resized_image = self.image.resize((new_width, new_height), Image.Resampling.NEAREST)
-        self.photo = ImageTk.PhotoImage(resized_image)
+        render_size = (new_width, new_height)
+        if self.rendered_image_cache is None or self.rendered_image_cache[0] != render_size:
+            resized_image = self.image.resize(render_size, Image.Resampling.NEAREST)
+            self.rendered_image_cache = (render_size, ImageTk.PhotoImage(resized_image, master=self.root))
+        self.photo = self.rendered_image_cache[1]
 
         center_x = self.offset_x + canvas_width // 2
         center_y = self.offset_y + canvas_height // 2
@@ -343,11 +389,13 @@ class ImageClassifierApp:
         self.start_y = event.y
 
     def pan_image(self, event: tk.Event) -> None:
-        self.offset_x += event.x - self.start_x
-        self.offset_y += event.y - self.start_y
+        delta_x = event.x - self.start_x
+        delta_y = event.y - self.start_y
+        self.offset_x += delta_x
+        self.offset_y += delta_y
         self.start_x = event.x
         self.start_y = event.y
-        self.update_canvas()
+        self.canvas.move("all", delta_x, delta_y)
 
     def show_next_image(self) -> None:
         self.stop_playback()
@@ -385,13 +433,12 @@ class ImageClassifierApp:
                 entry.insert(0, self.classifications[index])
             entries.append(entry)
 
-        def save_classes() -> None:
+        def save_classes(_event: tk.Event | None = None) -> None:
             class_names = [entry.get().strip() for entry in entries if entry.get().strip()]
-            if not class_names:
-                messagebox.showwarning("No Classes", "Please enter at least one classification.", parent=class_window)
-                return
             if len(set(class_names)) != len(class_names):
-                messagebox.showwarning("Duplicate Classes", "Each classification name must be unique.", parent=class_window)
+                messagebox.showwarning(
+                    "Duplicate Classes", "Each classification name must be unique.", parent=class_window
+                )
                 return
 
             self.classifications = class_names
@@ -402,6 +449,7 @@ class ImageClassifierApp:
         button_frame.pack(pady=10)
         ttk.Button(button_frame, text="Save", command=save_classes).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Cancel", command=class_window.destroy).pack(side=tk.LEFT, padx=5)
+        class_window.bind("<Return>", save_classes)
 
         class_window.update_idletasks()
         x = self.root.winfo_rootx() + (self.root.winfo_width() - class_window.winfo_width()) // 2
@@ -412,6 +460,8 @@ class ImageClassifierApp:
     def create_classification_buttons(self) -> None:
         for widget in self.classification_frame.winfo_children():
             widget.destroy()
+        for index in range(1, 10):
+            self.root.unbind(str(index))
 
         for index, class_name in enumerate(self.classifications, start=1):
             button = ttk.Button(
@@ -460,6 +510,7 @@ class ImageClassifierApp:
             return
 
         self.stop_playback()
+        self._clear_prefetch(wait=True)
         self._clear_image_display()
 
         moved_count = 0
@@ -552,4 +603,6 @@ class ImageClassifierApp:
 
     def close(self) -> None:
         self.stop_playback()
+        self._clear_prefetch()
+        self.image_loader.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()
