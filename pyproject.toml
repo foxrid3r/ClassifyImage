@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "classify-image"
-version = "0.2.0"
+version = "0.3.0"
 description = "A desktop GUI for manually classifying images into folders."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "Pillow>=10.0,<12",
     "sv-ttk>=2.6,<3",
-    "CairoSVG>=2.7,<3",
+    "resvg_py>=0.5,<1",
 ]
 
 [project.optional-dependencies]

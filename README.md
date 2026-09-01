@@ -11,10 +11,12 @@ ClassifyImage is a small desktop GUI for manually reviewing images, assigning ea
 - Navigate with the left and right arrow keys.
 - Fit each image to the viewing window by default.
 - Zoom with the mouse wheel and pan responsively by dragging, using pixel-preserving nearest-neighbor scaling.
+- Double-click the mouse wheel to reset zoom and pan and fit the image to the viewing window.
 - Automatically display an optional same-named SVG overlay (for example, `photo.svg` over `photo.png`).
-- Set one global line width for all stroked geometry, with proportionally scaled SVG markers and arrowheads.
+- Set one screen-pixel line width for all stroked geometry, independent of image size and zoom, with proportionally scaled SVG markers and arrowheads.
 - Play images automatically with a configurable delay and next-image prefetching for faster transitions.
-- Move classified images into class-named subfolders.
+- Inspect grouped file, image, embedded, and EXIF metadata in a collapsible side panel that follows navigation.
+- Choose an explicit Move or Copy action for classified images, then transfer them into class-named subfolders with progress feedback.
 - Warn before overwriting an existing destination filename.
 
 ![ClassifyImage demonstration](docs/assets/classify-image-demo.gif)
@@ -23,6 +25,8 @@ ClassifyImage is a small desktop GUI for manually reviewing images, assigning ea
 
 - Python 3.10 or newer
 - Tkinter, normally included with the Windows Python installer
+
+SVG rendering is provided by a bundled Python wheel and does not require a separate Cairo or GTK installation.
 
 ## Setup on Windows PowerShell
 

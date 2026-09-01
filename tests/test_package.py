@@ -1,12 +1,23 @@
+from io import BytesIO
 from pathlib import Path
 from xml.etree import ElementTree
 
+import resvg_py
+from PIL import Image
+
 from classify_image import __version__
-from classify_image.app import MAX_CLASSES, SUPPORTED_EXTENSIONS, fitted_size, matching_svg_path, svg_with_line_width
+from classify_image.app import (
+    MAX_CLASSES,
+    SUPPORTED_EXTENSIONS,
+    fitted_size,
+    image_metadata,
+    matching_svg_path,
+    svg_with_line_width,
+)
 
 
 def test_version() -> None:
-    assert __version__ == "0.2.0"
+    assert __version__ == "0.3.0"
 
 
 def test_supported_extensions() -> None:
@@ -48,3 +59,54 @@ def test_svg_with_line_width_overrides_all_vector_geometry(tmp_path: Path) -> No
     root = ElementTree.fromstring(result_bytes)
     marker = next(element for element in root.iter() if element.tag.endswith("marker"))
     assert marker.get("markerUnits") == "strokeWidth"
+
+
+def test_svg_line_width_is_converted_from_screen_pixels(tmp_path: Path) -> None:
+    svg_path = tmp_path / "example.svg"
+    svg_path.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><path d="M0 0L1 1"/></svg>',
+        encoding="utf-8",
+    )
+
+    result = svg_with_line_width(svg_path, 4, (200, 100)).decode("utf-8")
+
+    assert "stroke-width: 2 !important" in result
+
+
+def test_resvg_renders_svg_to_png_at_matching_target_aspect_ratio(tmp_path: Path) -> None:
+    svg_path = tmp_path / "example.svg"
+    svg_path.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="red"/></svg>',
+        encoding="utf-8",
+    )
+
+    png_bytes = resvg_py.svg_to_bytes(
+        svg_string=svg_with_line_width(svg_path, 2, (20, 20)).decode("utf-8"),
+        width=20,
+        height=20,
+        resources_dir=str(tmp_path),
+    )
+
+    with Image.open(BytesIO(png_bytes)) as rendered:
+        assert rendered.format == "PNG"
+        assert rendered.size == (20, 20)
+
+
+def test_image_metadata_includes_file_image_and_exif_details(tmp_path: Path) -> None:
+    image_path = tmp_path / "example.jpg"
+    overlay_path = tmp_path / "example.svg"
+    overlay_path.touch()
+    exif = Image.Exif()
+    exif[271] = "Example Camera"
+    Image.new("RGB", (40, 20), "red").save(image_path, exif=exif, dpi=(300, 300))
+
+    sections = dict(image_metadata(image_path, overlay_path))
+    file_details = dict(sections["File"])
+    image_details = dict(sections["Image"])
+    exif_details = dict(sections["EXIF"])
+
+    assert file_details["Name"] == "example.jpg"
+    assert file_details["SVG overlay"] == "example.svg"
+    assert image_details["Format"] == "JPEG"
+    assert image_details["Dimensions"] == "40 × 20 pixels"
+    assert exif_details["Make"] == "Example Camera"
