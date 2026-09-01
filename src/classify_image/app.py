@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tkinter as tk
 from collections import OrderedDict
@@ -17,6 +18,7 @@ from PIL import ExifTags, Image, ImageTk
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 MAX_CLASSES = 10
 MIN_PLAY_DELAY_MS = 10
+INHERITED_FONT_PROPERTIES = ("font-family", "font-size", "font-style", "font-weight")
 
 
 def _display_value(value: object, limit: int = 300) -> str:
@@ -118,19 +120,73 @@ def _svg_viewport_size(root: ElementTree.Element) -> tuple[float, float] | None:
         return None
 
 
+def _style_declarations(style_text: str) -> dict[str, str]:
+    return {
+        name.strip(): value.strip()
+        for declaration in style_text.split(";")
+        if ":" in declaration
+        for name, value in (declaration.split(":", 1),)
+    }
+
+
+def _normalized_font_size(value: str) -> str:
+    """Convert point font sizes to pixels for resvg's text layout."""
+    if value.casefold().endswith("pt"):
+        try:
+            return f"{float(value[:-2]) * 96 / 72:g}px"
+        except ValueError:
+            pass
+    return value
+
+
+def _materialize_svg_font_styles(root: ElementTree.Element) -> None:
+    """Put inherited CSS font properties directly on text for renderer compatibility."""
+    class_styles: dict[str, dict[str, str]] = {}
+    for element in root.iter():
+        if isinstance(element.tag, str) and element.tag.rsplit("}", 1)[-1] == "style" and element.text:
+            for selector, declarations in re.findall(r"([^{}]+)\{([^{}]*)\}", element.text):
+                for class_name in re.findall(r"\.([\w-]+)", selector):
+                    class_styles.setdefault(class_name, {}).update(_style_declarations(declarations))
+
+    def visit(element: ElementTree.Element, inherited: dict[str, str]) -> None:
+        effective = inherited.copy()
+        for class_name in element.get("class", "").split():
+            effective.update(class_styles.get(class_name, {}))
+        effective.update(_style_declarations(element.get("style", "")))
+        for property_name in INHERITED_FONT_PROPERTIES:
+            if property_name in element.attrib:
+                effective[property_name] = element.attrib[property_name]
+
+        tag_name = element.tag.rsplit("}", 1)[-1] if isinstance(element.tag, str) else ""
+        if tag_name in {"text", "tspan"}:
+            for property_name in INHERITED_FONT_PROPERTIES:
+                if property_name in effective and (property_name == "font-size" or property_name not in element.attrib):
+                    value = effective[property_name]
+                    element.set(property_name, _normalized_font_size(value) if property_name == "font-size" else value)
+        for child in element:
+            visit(child, effective)
+
+    visit(root, {})
+
+
 def svg_with_line_width(
     svg_path: Path,
     line_width: float,
     render_size: tuple[int, int] | None = None,
+    text_size: float | None = None,
 ) -> bytes:
-    """Return SVG data with a uniform, screen-pixel geometry stroke width."""
+    """Return SVG data with uniform screen-pixel stroke and text sizes."""
     root = ElementTree.parse(svg_path).getroot()
+    _materialize_svg_font_styles(root)
     source_line_width = line_width
+    source_text_size = text_size
     viewport_size = _svg_viewport_size(root)
     if render_size is not None and viewport_size is not None:
         scale = min(render_size[0] / viewport_size[0], render_size[1] / viewport_size[1])
         if scale > 0:
             source_line_width = line_width / scale
+            if text_size is not None:
+                source_text_size = text_size / scale
     namespace = root.tag.partition("}")[0].removeprefix("{") if "}" in root.tag else ""
     style_tag = f"{{{namespace}}}style" if namespace else "style"
     style = ElementTree.Element(style_tag, {"type": "text/css"})
@@ -141,6 +197,11 @@ def svg_with_line_width(
     marker_tag = f"{{{namespace}}}marker" if namespace else "marker"
     for marker in root.iter(marker_tag):
         marker.set("markerUnits", "strokeWidth")
+    if source_text_size is not None:
+        for element in root.iter():
+            tag_name = element.tag.rsplit("}", 1)[-1] if isinstance(element.tag, str) else ""
+            if tag_name in {"text", "tspan"}:
+                element.set("font-size", f"{source_text_size:g}px")
     return ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
@@ -174,6 +235,8 @@ class ImageClassifierApp:
         self.overlay_enabled = tk.BooleanVar(value=True)
         self.overlay_line_width = 1.0
         self.overlay_line_width_var = tk.StringVar(value="1")
+        self.overlay_text_size = 16.0
+        self.overlay_text_size_var = tk.StringVar(value="16")
         self.transfer_mode = tk.StringVar(value="Move")
         self.details_visible = False
         self.is_playing = False
@@ -218,7 +281,7 @@ class ImageClassifierApp:
             overlay_control_frame,
             text="Show SVG Overlay",
             variable=self.overlay_enabled,
-            command=self.update_canvas,
+            command=self.toggle_svg_overlay,
         ).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Label(overlay_control_frame, text="Line width").pack(side=tk.LEFT, padx=(10, 5))
         self.overlay_line_width_spinbox = ttk.Spinbox(
@@ -233,6 +296,19 @@ class ImageClassifierApp:
         self.overlay_line_width_spinbox.pack(side=tk.LEFT)
         self.overlay_line_width_spinbox.bind("<Return>", self.set_overlay_line_width)
         self.overlay_line_width_spinbox.bind("<FocusOut>", self.set_overlay_line_width)
+        ttk.Label(overlay_control_frame, text="Text size").pack(side=tk.LEFT, padx=(15, 5))
+        self.overlay_text_size_spinbox = ttk.Spinbox(
+            overlay_control_frame,
+            from_=1.0,
+            to=200.0,
+            increment=1.0,
+            width=5,
+            textvariable=self.overlay_text_size_var,
+            command=self.set_overlay_text_size,
+        )
+        self.overlay_text_size_spinbox.pack(side=tk.LEFT)
+        self.overlay_text_size_spinbox.bind("<Return>", self.set_overlay_text_size)
+        self.overlay_text_size_spinbox.bind("<FocusOut>", self.set_overlay_text_size)
 
         self.content_pane = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
         self.content_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -448,7 +524,12 @@ class ImageClassifierApp:
             import resvg_py
 
             svg_png = resvg_py.svg_to_bytes(
-                svg_string=svg_with_line_width(self.overlay_path, self.overlay_line_width, size).decode("utf-8"),
+                svg_string=svg_with_line_width(
+                    self.overlay_path,
+                    self.overlay_line_width,
+                    size,
+                    self.overlay_text_size,
+                ).decode("utf-8"),
                 width=size[0],
                 height=size[1],
                 resources_dir=os.fspath(self.overlay_path.parent),
@@ -481,6 +562,28 @@ class ImageClassifierApp:
         if line_width == self.overlay_line_width:
             return
         self.overlay_line_width = line_width
+        self.overlay_cache.clear()
+        self.update_canvas()
+
+    def toggle_svg_overlay(self) -> None:
+        """Toggle the overlay and its related controls as one UI state."""
+        state = "normal" if self.overlay_enabled.get() else "disabled"
+        self.overlay_line_width_spinbox.config(state=state)
+        self.overlay_text_size_spinbox.config(state=state)
+        self.update_canvas()
+
+    def set_overlay_text_size(self, _event: tk.Event | None = None) -> None:
+        try:
+            text_size = float(self.overlay_text_size_var.get())
+            if text_size <= 0:
+                raise ValueError
+        except ValueError:
+            self.overlay_text_size_var.set(f"{self.overlay_text_size:g}")
+            return
+
+        if text_size == self.overlay_text_size:
+            return
+        self.overlay_text_size = text_size
         self.overlay_cache.clear()
         self.update_canvas()
 

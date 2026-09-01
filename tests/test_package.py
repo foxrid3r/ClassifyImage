@@ -17,7 +17,7 @@ from classify_image.app import (
 
 
 def test_version() -> None:
-    assert __version__ == "0.3.0"
+    assert __version__ == "0.3.1"
 
 
 def test_supported_extensions() -> None:
@@ -73,6 +73,20 @@ def test_svg_line_width_is_converted_from_screen_pixels(tmp_path: Path) -> None:
     assert "stroke-width: 2 !important" in result
 
 
+def test_svg_text_size_is_converted_from_screen_pixels(tmp_path: Path) -> None:
+    svg_path = tmp_path / "example.svg"
+    svg_path.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><text x="1" y="10">Label</text></svg>',
+        encoding="utf-8",
+    )
+
+    result = svg_with_line_width(svg_path, 1, (200, 100), text_size=12)
+    root = ElementTree.fromstring(result)
+    text_element = next(element for element in root.iter() if element.tag.endswith("text"))
+
+    assert text_element.get("font-size") == "6px"
+
+
 def test_resvg_renders_svg_to_png_at_matching_target_aspect_ratio(tmp_path: Path) -> None:
     svg_path = tmp_path / "example.svg"
     svg_path.write_text(
@@ -90,6 +104,31 @@ def test_resvg_renders_svg_to_png_at_matching_target_aspect_ratio(tmp_path: Path
     with Image.open(BytesIO(png_bytes)) as rendered:
         assert rendered.format == "PNG"
         assert rendered.size == (20, 20)
+
+
+def test_resvg_renders_inherited_svg_text(tmp_path: Path) -> None:
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="2840" height="2840" viewBox="0 0 2840 2840" '
+        'font-family="arial"><style>.label { font-size:64pt; font-family:Arial; }</style>'
+        '<g class="label"><text x="1420" y="1420" fill="#32CD32">Empty</text></g></svg>'
+    )
+    svg_path = tmp_path / "text.svg"
+    svg_path.write_text(svg, encoding="utf-8")
+
+    normalized_svg = svg_with_line_width(svg_path, 2, (710, 710))
+    normalized_root = ElementTree.fromstring(normalized_svg)
+    text_element = next(element for element in normalized_root.iter() if element.tag.endswith("text"))
+    assert text_element.get("font-size") == "85.3333px"
+    assert text_element.get("font-family") == "Arial"
+
+    png_bytes = resvg_py.svg_to_bytes(
+        svg_string=normalized_svg.decode("utf-8"),
+        width=710,
+        height=710,
+    )
+
+    with Image.open(BytesIO(png_bytes)) as rendered:
+        assert rendered.getbbox() is not None
 
 
 def test_image_metadata_includes_file_image_and_exif_details(tmp_path: Path) -> None:
