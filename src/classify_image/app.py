@@ -5,11 +5,13 @@ import re
 import shutil
 import tkinter as tk
 from collections import OrderedDict
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_for_futures
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from queue import Empty, SimpleQueue
 from tkinter import filedialog, messagebox, ttk
 from xml.etree import ElementTree
 
@@ -100,6 +102,45 @@ def matching_svg_path(image_path: Path) -> Path | None:
         )
     except OSError:
         return None
+
+
+def transfer_classified_files(
+    folder_path: Path,
+    classified_items: Iterable[tuple[str, str]],
+    *,
+    copying: bool,
+    progress_callback: Callable[[int], None] | None = None,
+) -> tuple[int, list[str]]:
+    """Transfer classified files without depending on the Tk event thread."""
+    completed_count = 0
+    failures: list[str] = []
+    transfer = shutil.copy2 if copying else shutil.move
+    for progress, (filename, classification) in enumerate(classified_items, start=1):
+        source = folder_path / filename
+        destination_dir = folder_path / classification
+        destination = destination_dir / filename
+        overlay_source = matching_svg_path(source)
+        overlay_destination = destination_dir / overlay_source.name if overlay_source is not None else None
+
+        try:
+            destination_dir.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                failures.append(f"{filename}: destination already exists")
+                continue
+            if overlay_destination is not None and overlay_destination.exists():
+                failures.append(f"{filename}: SVG overlay destination already exists")
+                continue
+            transfer(os.fspath(source), os.fspath(destination))
+            if overlay_source is not None and overlay_destination is not None:
+                transfer(os.fspath(overlay_source), os.fspath(overlay_destination))
+            completed_count += 1
+        except OSError as exc:
+            failures.append(f"{filename}: {exc}")
+        finally:
+            if progress_callback is not None:
+                progress_callback(progress)
+
+    return completed_count, failures
 
 
 def _svg_viewport_size(root: ElementTree.Element) -> tuple[float, float] | None:
@@ -244,6 +285,11 @@ class ImageClassifierApp:
         self.play_after_id: str | None = None
         self.image_loader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="image-loader")
         self.prefetched_images: dict[Path, Future[Image.Image]] = {}
+        self.transfer_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="file-transfer")
+        self.transfer_future: Future[tuple[int, list[str]]] | None = None
+        self.transfer_updates: SimpleQueue[int] = SimpleQueue()
+        self.transfer_folder: Path | None = None
+        self.transfer_operation = ""
 
         self._create_widgets()
 
@@ -800,6 +846,8 @@ class ImageClassifierApp:
         self.show_image()
 
     def move_classified_images(self) -> None:
+        if self.transfer_future is not None:
+            return
         if not self.classified_map or self.folder_path is None:
             messagebox.showinfo("No Classifications", "No images have been classified yet.")
             return
@@ -821,37 +869,44 @@ class ImageClassifierApp:
         self.transfer_progress.pack(fill=tk.X, padx=10, pady=(0, 5))
         self.root.update_idletasks()
 
-        completed_count = 0
-        failures: list[str] = []
-        transfer = shutil.copy2 if copying else shutil.move
-        for progress, (filename, classification) in enumerate(list(self.classified_map.items()), start=1):
-            source = self.folder_path / filename
-            destination_dir = self.folder_path / classification
-            destination = destination_dir / filename
-            overlay_source = matching_svg_path(source)
-            overlay_destination = destination_dir / overlay_source.name if overlay_source is not None else None
+        self.transfer_button.config(state=tk.DISABLED)
+        self.transfer_mode_selector.config(state=tk.DISABLED)
+        self.transfer_folder = self.folder_path
+        self.transfer_operation = operation
+        self.transfer_future = self.transfer_executor.submit(
+            transfer_classified_files,
+            self.transfer_folder,
+            list(self.classified_map.items()),
+            copying=copying,
+            progress_callback=self.transfer_updates.put,
+        )
+        self.root.after(50, self._poll_transfer)
 
-            try:
-                destination_dir.mkdir(parents=True, exist_ok=True)
-                if destination.exists():
-                    failures.append(f"{filename}: destination already exists")
-                    continue
-                if overlay_destination is not None and overlay_destination.exists():
-                    failures.append(f"{filename}: SVG overlay destination already exists")
-                    continue
-                transfer(os.fspath(source), os.fspath(destination))
-                if overlay_source is not None and overlay_destination is not None:
-                    transfer(os.fspath(overlay_source), os.fspath(overlay_destination))
-                completed_count += 1
-            except OSError as exc:
-                failures.append(f"{filename}: {exc}")
-            finally:
-                self.transfer_progress.config(value=progress)
-                self.root.update_idletasks()
+    def _poll_transfer(self) -> None:
+        future = self.transfer_future
+        if future is None:
+            return
+        try:
+            while True:
+                self.transfer_progress.config(value=self.transfer_updates.get_nowait())
+        except Empty:
+            pass
 
+        if not future.done():
+            self.root.after(50, self._poll_transfer)
+            return
+
+        completed_count, failures = future.result()
+        operation = self.transfer_operation
+        copying = operation == "Copy"
+        transfer_folder = self.transfer_folder
+        self.transfer_future = None
+        self.transfer_folder = None
         self.transfer_progress.pack_forget()
+        self.transfer_button.config(state=tk.NORMAL)
+        self.transfer_mode_selector.config(state="readonly")
 
-        if not copying:
+        if not copying and self.folder_path == transfer_folder:
             self.load_images()
             self.show_image()
 
@@ -921,4 +976,5 @@ class ImageClassifierApp:
         self.stop_playback()
         self._clear_prefetch()
         self.image_loader.shutdown(wait=False, cancel_futures=True)
+        self.transfer_executor.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()

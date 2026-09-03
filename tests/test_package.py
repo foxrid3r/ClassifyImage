@@ -13,11 +13,12 @@ from classify_image.app import (
     image_metadata,
     matching_svg_path,
     svg_with_line_width,
+    transfer_classified_files,
 )
 
 
 def test_version() -> None:
-    assert __version__ == "0.3.1"
+    assert __version__ == "0.3.2"
 
 
 def test_supported_extensions() -> None:
@@ -41,6 +42,46 @@ def test_matching_svg_path_is_case_insensitive(tmp_path: Path) -> None:
 
 def test_matching_svg_path_returns_none_when_absent(tmp_path: Path) -> None:
     assert matching_svg_path(tmp_path / "example.png") is None
+
+
+def test_transfer_classified_files_reports_progress_and_copies_overlay(tmp_path: Path) -> None:
+    (tmp_path / "example.png").write_bytes(b"image")
+    (tmp_path / "example.svg").write_text("<svg/>", encoding="utf-8")
+    progress: list[int] = []
+
+    completed, failures = transfer_classified_files(
+        tmp_path, [("example.png", "accepted")], copying=True, progress_callback=progress.append
+    )
+
+    assert completed == 1
+    assert failures == []
+    assert progress == [1]
+    assert (tmp_path / "example.png").exists()
+    assert (tmp_path / "accepted" / "example.png").read_bytes() == b"image"
+    assert (tmp_path / "accepted" / "example.svg").read_text(encoding="utf-8") == "<svg/>"
+
+
+def test_transfer_classified_files_moves_source_and_reports_existing_destination(tmp_path: Path) -> None:
+    (tmp_path / "first.png").write_bytes(b"first")
+    (tmp_path / "second.png").write_bytes(b"second")
+    destination = tmp_path / "accepted"
+    destination.mkdir()
+    (destination / "second.png").write_bytes(b"existing")
+    progress: list[int] = []
+
+    completed, failures = transfer_classified_files(
+        tmp_path,
+        [("first.png", "accepted"), ("second.png", "accepted")],
+        copying=False,
+        progress_callback=progress.append,
+    )
+
+    assert completed == 1
+    assert failures == ["second.png: destination already exists"]
+    assert progress == [1, 2]
+    assert not (tmp_path / "first.png").exists()
+    assert (destination / "first.png").read_bytes() == b"first"
+    assert (tmp_path / "second.png").exists()
 
 
 def test_svg_with_line_width_overrides_all_vector_geometry(tmp_path: Path) -> None:
