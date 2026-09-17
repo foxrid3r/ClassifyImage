@@ -17,6 +17,8 @@ from xml.etree import ElementTree
 
 from PIL import ExifTags, Image, ImageTk
 
+from classify_image.anchors import svg_anchors
+
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 MAX_CLASSES = 10
 MIN_PLAY_DELAY_MS = 10
@@ -263,6 +265,11 @@ class ImageClassifierApp:
         self.overlay_paths: dict[str, Path] = {}
 
         self.zoom_factor = 1.0
+        self.anchor_key = None
+        self.anchors = []
+        self.anchor_preview = None
+        self.anchor_window = None
+        self.anchor_status = tk.StringVar(value="Anchor off")
         self.offset_x = 0
         self.offset_y = 0
         self.start_x = 0
@@ -355,6 +362,9 @@ class ImageClassifierApp:
         self.overlay_text_size_spinbox.pack(side=tk.LEFT)
         self.overlay_text_size_spinbox.bind("<Return>", self.set_overlay_text_size)
         self.overlay_text_size_spinbox.bind("<FocusOut>", self.set_overlay_text_size)
+        ttk.Button(overlay_control_frame, text="Select Anchor", command=self.select_anchor).pack(side=tk.LEFT, padx=10)
+        ttk.Button(overlay_control_frame, text="Unlock", command=self.unlock_anchor).pack(side=tk.LEFT)
+        ttk.Label(self.root, textvariable=self.anchor_status).pack()
 
         self.content_pane = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
         self.content_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -454,6 +464,7 @@ class ImageClassifierApp:
         self.folder_path = Path(folder_selected)
         self.directory_label.config(text=f"{self.folder_path}")
         self.load_images()
+        self.anchor_key = None
         self.reset_view()
         self.show_image()
 
@@ -557,6 +568,70 @@ class ImageClassifierApp:
     def _load_overlay(self, image_path: Path) -> None:
         self.overlay_path = self.overlay_paths.get(image_path.stem.casefold())
         self.overlay_cache.clear()
+        self.anchors = []
+        if self.overlay_path is not None:
+            try:
+                self.anchors = svg_anchors(self.overlay_path)
+            except (OSError, ValueError, ElementTree.ParseError):
+                pass
+
+    def unlock_anchor(self) -> None:
+        self.anchor_key = None
+        self.anchor_preview = None
+        self.anchor_status.set("Anchor off")
+        self.reset_view()
+        self.update_canvas()
+
+    def select_anchor(self) -> None:
+        self.stop_playback()
+        if self.anchor_window is not None:
+            self.anchor_window.lift()
+            return
+        window = tk.Toplevel(self.root)
+        self.anchor_window = window
+        window.title("Select SVG Anchor")
+        window.geometry("530x320")
+        window.transient(self.root)
+        window.grab_set()
+        ttk.Label(window, text="Select a point or endpoint to highlight it in the image.").pack(padx=10, pady=10)
+        tree = ttk.Treeview(window, columns=("x", "y"), selectmode="browse")
+        tree.heading("#0", text="Element / anchor")
+        tree.heading("x", text="Image X (%)")
+        tree.heading("y", text="Image Y (%)")
+        tree.column("#0", width=280)
+        tree.column("x", width=90)
+        tree.column("y", width=90)
+        tree.pack(fill=tk.BOTH, expand=True, padx=10)
+        for i, anchor in enumerate(self.anchors):
+            tree.insert(
+                "", "end", iid=str(i), text=anchor.label, values=(f"{anchor.x * 100:.3f}", f"{anchor.y * 100:.3f}")
+            )
+        if not self.anchors:
+            ttk.Label(window, text="No supported, identified anchors inside this SVG viewBox.").pack()
+
+        def preview(_event=None):
+            selected = tree.selection()
+            self.anchor_preview = self.anchors[int(selected[0])] if selected else None
+            self.update_canvas()
+
+        def close():
+            self.anchor_preview = None
+            self.anchor_window = None
+            window.destroy()
+            self.update_canvas()
+
+        def apply():
+            if self.anchor_preview is not None:
+                self.anchor_key = self.anchor_preview.key
+                self.offset_x = self.offset_y = 0
+                close()
+
+        tree.bind("<<TreeviewSelect>>", preview)
+        buttons = ttk.Frame(window)
+        buttons.pack(pady=10)
+        ttk.Button(buttons, text="Lock to center", command=apply).pack(side=tk.LEFT, padx=5)
+        ttk.Button(buttons, text="Cancel", command=close).pack(side=tk.LEFT, padx=5)
+        window.protocol("WM_DELETE_WINDOW", close)
 
     def _get_rendered_overlay(self, size: tuple[int, int]) -> ImageTk.PhotoImage | None:
         if self.overlay_path is None:
@@ -652,6 +727,16 @@ class ImageClassifierApp:
 
         center_x = self.offset_x + canvas_width // 2
         center_y = self.offset_y + canvas_height // 2
+        anchor = next((a for a in self.anchors if a.key == self.anchor_key), None)
+        if anchor is not None:
+            center_x += (0.5 - anchor.x) * new_width
+            center_y += (0.5 - anchor.y) * new_height
+            self.anchor_status.set(f"Locked: {anchor.label} — drag to reposition")
+        elif self.anchor_key is not None:
+            self.anchor_status.set("Anchor missing — playback stopped; showing centered image")
+            self.stop_playback()
+        else:
+            self.anchor_status.set("Anchor off")
 
         self.canvas.delete("all")
         self.canvas.create_image(center_x, center_y, image=self.photo, anchor=tk.CENTER)
@@ -659,6 +744,13 @@ class ImageClassifierApp:
             rendered_overlay = self._get_rendered_overlay((new_width, new_height))
             if rendered_overlay is not None:
                 self.canvas.create_image(center_x, center_y, image=rendered_overlay, anchor=tk.CENTER)
+
+        if self.anchor_preview is not None:
+            x = center_x + (self.anchor_preview.x - 0.5) * new_width
+            y = center_y + (self.anchor_preview.y - 0.5) * new_height
+            self.canvas.create_oval(x - 8, y - 8, x + 8, y + 8, outline="yellow", width=2)
+            self.canvas.create_line(x - 14, y, x + 14, y, fill="yellow")
+            self.canvas.create_line(x, y - 14, x, y + 14, fill="yellow")
 
         if self.images[self.current_index] in self.classified_map:
             self.canvas.create_rectangle(
@@ -704,14 +796,15 @@ class ImageClassifierApp:
             self.show_image()
 
     def reset_view(self) -> None:
+        if self.anchor_key is not None:
+            return
         self.zoom_factor = 1.0
         self.offset_x = 0
         self.offset_y = 0
 
     def fit_image_to_window(self, _event: tk.Event | None = None) -> None:
         """Reset zoom and pan so the image fits inside the canvas."""
-        self.reset_view()
-        self.update_canvas()
+        self.unlock_anchor()
 
     def define_classes(self) -> None:
         class_window = tk.Toplevel(self.root)
@@ -961,7 +1054,8 @@ class ImageClassifierApp:
             self.current_index += 1
             self.reset_view()
             self.show_image()
-            self.play_after_id = self.root.after(self.play_delay_ms, self.play_images)
+            if self.is_playing:
+                self.play_after_id = self.root.after(self.play_delay_ms, self.play_images)
         else:
             self.stop_playback()
 

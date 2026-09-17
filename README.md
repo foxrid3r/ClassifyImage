@@ -13,6 +13,7 @@ ClassifyImage is a small desktop GUI for manually reviewing images, assigning ea
 - Zoom with the mouse wheel and pan responsively by dragging, using pixel-preserving nearest-neighbor scaling.
 - Double-click the mouse wheel to reset zoom and pan and fit the image to the viewing window.
 - Automatically display an optional same-named SVG overlay (for example, `photo.svg` over `photo.png`).
+- Select an SVG point or line endpoint and lock it to the viewer while navigating or playing images.
 - Set one screen-pixel line width for all stroked geometry, independent of image size and zoom, with proportionally scaled SVG markers and arrowheads.
 - Set one screen-pixel text size for SVG labels, independent of image size and zoom.
 - Automatically disable SVG sizing controls while the overlay is hidden.
@@ -84,5 +85,26 @@ ClassifyImage/
 ```
 
 ## Notes
+
+### Trying SVG anchor lock
+
+Click **Select Anchor**, select a row to highlight its location on the current image, then click
+**Lock to center**. Drag the image to move the pinned location. Zoom and the pinned location persist
+when advancing, including during playback. **Unlock** or double-clicking the mouse wheel restores
+normal fit-to-window viewing. If an anchor is missing, playback stops and the status explains why.
+
+The first implementation supports identified circles/ellipses, line endpoints, and zero-length
+`M x y h 0` point paths such as those in the sample files. Elements are matched by `id` or their
+parent group's `data-c` label and position within that group. Only anchors inside the SVG viewBox
+are listed; marker definitions are excluded. Standard group transforms are supported. Nested SVG
+viewports, arbitrary path geometry, and CSS-controlled visibility are not fully supported.
+Use overlays whose viewport aspect ratio matches the raster, as in the provided examples.
+
+To run branch source directly when the virtual environment contains an older installed release:
+
+```powershell
+$env:PYTHONPATH = 'src'
+.\.venv\Scripts\python.exe -m classify_image
+```
 
 Classifications are held in memory until files are moved. Selecting a different source folder clears the current classification session.
