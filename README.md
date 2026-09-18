@@ -61,6 +61,9 @@ Without activating the virtual environment, run the generated launcher directly:
 
 ## Development
 
+Sample BMP images and matching SVG overlays are in [`examples/images/`](examples/images/).
+See the [example instructions](examples/README.md) for trying overlays and anchor locking.
+
 ```powershell
 python -m pip install -e ".[dev]"
 python -m ruff check src tests
@@ -72,6 +75,9 @@ python -m pytest
 
 ```text
 ClassifyImage/
+├── examples/
+│   ├── images/
+│   └── README.md
 ├── src/
 │   └── classify_image/
 │       ├── __init__.py
