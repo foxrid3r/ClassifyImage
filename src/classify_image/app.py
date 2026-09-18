@@ -593,7 +593,11 @@ class ImageClassifierApp:
         window.geometry("530x320")
         window.transient(self.root)
         window.grab_set()
-        ttk.Label(window, text="Select a point or endpoint to highlight it in the image.").pack(padx=10, pady=10)
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(1, weight=1)
+        ttk.Label(window, text="Select a point or endpoint to highlight it in the image.").grid(
+            row=0, column=0, padx=10, pady=10
+        )
         tree = ttk.Treeview(window, columns=("x", "y"), selectmode="browse")
         tree.heading("#0", text="Element / anchor")
         tree.heading("x", text="Image X (%)")
@@ -601,13 +605,13 @@ class ImageClassifierApp:
         tree.column("#0", width=280)
         tree.column("x", width=90)
         tree.column("y", width=90)
-        tree.pack(fill=tk.BOTH, expand=True, padx=10)
+        tree.grid(row=1, column=0, sticky="nsew", padx=10)
         for i, anchor in enumerate(self.anchors):
             tree.insert(
                 "", "end", iid=str(i), text=anchor.label, values=(f"{anchor.x * 100:.3f}", f"{anchor.y * 100:.3f}")
             )
         if not self.anchors:
-            ttk.Label(window, text="No supported, identified anchors inside this SVG viewBox.").pack()
+            ttk.Label(window, text="No supported, identified anchors inside this SVG viewBox.").grid(row=2, column=0)
 
         def preview(_event=None):
             selected = tree.selection()
@@ -628,7 +632,7 @@ class ImageClassifierApp:
 
         tree.bind("<<TreeviewSelect>>", preview)
         buttons = ttk.Frame(window)
-        buttons.pack(pady=10)
+        buttons.grid(row=3, column=0, pady=10)
         ttk.Button(buttons, text="Lock to center", command=apply).pack(side=tk.LEFT, padx=5)
         ttk.Button(buttons, text="Cancel", command=close).pack(side=tk.LEFT, padx=5)
         window.protocol("WM_DELETE_WINDOW", close)
