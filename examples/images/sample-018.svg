@@ -1,0 +1,233 @@
+<svg     xmlns="http://www.w3.org/2000/svg"     xmlns:xlink="http://www.w3.org/1999/xlink"     version="1.1"     font-family="arial"     width="108" height="80" viewBox="636 280 108 80">
+<defs>
+<clipPath id="cam000000020E904c0">
+<path d=" M 636.3,280.5 h 104 v 76 h -104z" stroke="#32CD32"/>
+</clipPath>
+</defs>
+<!--image Sta1031_BaseLocate_Image000011_2026-04-30_CG8_Base2_Pocket4.bmp: /cam0/img/001000000895584?sz=108,80 -->
+<image x="636" y="280" width="108px" height="80px" xlink:href="Sta1031_BaseLocate_Image000011_2026-04-30_CG8_Base2_Pocket4.bmp" style="clip-path: url(#cam000000020E904c0);"/>
+<defs>
+<marker id="cam000000020E907d0" viewBox="0 0 15 15" refX="7.5" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="10.000000" markerHeight="10.000000" orient="auto">
+<path d="M 0 0 L 15 7.5 L 0 15 z" fill="#008000"/>
+</marker>
+
+<marker id="cam000000020E906d0" viewBox="0 0 15 15" refX="7.5" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="10.000000" markerHeight="10.000000" orient="auto">
+<path d="M 0 0 L 15 7.5 L 0 15 z" fill="#FF0000"/>
+</marker>
+
+<marker id="cam000000020E905d3" viewBox="0 0 4.000000 4.000000" refX="2.000000" refY="2.000000" markerUnits="userSpaceOnUse" markerWidth="4.000000" markerHeight="4.000000" orient="0">
+<g stroke-width="0.333333" stroke="#0000FF" fill="transparent">
+<path d="M 0.266667 2.000000 h 1.466667 M 3.733333 2.000000 h -1.466667 M 2.000000 0.266667 v 1.466667 M 2.000000 3.733333 v -1.466667"/>
+<circle cx="2.000000" cy="2.000000" r="1.733333"/>
+</g>
+</marker>
+
+</defs>
+<style>
+	.ds-cam0000000000006	{ font-size:9.00pt;stroke-width:2.00; }
+	.s-cam0000000000007	{ stroke-width:3.00; }
+</style>
+<g data-c="C49" class="editable ds-cam0000000000006"></g>
+<g data-c="D49" class="ds-cam0000000000006"></g>
+<g data-c="C50" class="editable ds-cam0000000000006"></g>
+<g data-c="D50" class="ds-cam0000000000006"></g>
+<g data-c="B75" class="ds-cam0000000000006"></g>
+<g data-c="B80" class="editable ds-cam0000000000006"></g>
+<g data-c="C80" class="editable ds-cam0000000000006"></g>
+<g data-c="D80" class="editable ds-cam0000000000006"></g>
+<g data-c="B81" class="editable ds-cam0000000000006"></g>
+<g data-c="C81" class="editable ds-cam0000000000006"></g>
+<g data-c="D81" class="editable ds-cam0000000000006"></g>
+<g data-c="B93" class="ds-cam0000000000006"></g>
+<g data-c="B94" class="ds-cam0000000000006"></g>
+<g data-c="B96" class="ds-cam0000000000006"></g>
+<g data-c="B101" class="ds-cam0000000000006"></g>
+<g data-c="C101" class="ds-cam0000000000006"></g>
+<g data-c="E101" class="ds-cam0000000000006"></g>
+<g data-c="F101" class="ds-cam0000000000006"></g>
+<g data-c="H101" class="ds-cam0000000000006"><line x1="819.6" y1="433.3" x2="186.2" y2="435.6" stroke="#32CD32" />
+</g>
+<g data-c="B106" class="ds-cam0000000000006"></g>
+<g data-c="G106" class="ds-cam0000000000006"><path marker-end="url(#cam000000020E905d3)" d="M 105.250900 262.172058 h 0" stroke="#0000FF" fill="none"/>
+</g>
+<g data-c="B107" class="ds-cam0000000000006"></g>
+<g data-c="D107" class="ds-cam0000000000006"></g>
+<g data-c="E107" class="ds-cam0000000000006"></g>
+<g data-c="G107" class="ds-cam0000000000006"><line x1="105.3" y1="262.2" x2="155.3" y2="262" stroke="#FF0000"  marker-end="url(#cam000000020E906d0)"/>
+</g>
+<g data-c="B108" class="ds-cam0000000000006"></g>
+<g data-c="D108" class="ds-cam0000000000006"></g>
+<g data-c="E108" class="ds-cam0000000000006"></g>
+<g data-c="G108" class="ds-cam0000000000006"><line x1="105.3" y1="262.2" x2="105.1" y2="212.2" stroke="#008000"  marker-end="url(#cam000000020E907d0)"/>
+</g>
+<g data-c="F113" class="ds-cam0000000000006"></g>
+<g data-c="F114" class="ds-cam0000000000006"></g>
+<g data-c="F115" class="ds-cam0000000000006"></g>
+<g data-c="F116" class="ds-cam0000000000006"></g>
+<g data-c="C123" class="editable ds-cam0000000000006"></g>
+<g data-c="D123" class="ds-cam0000000000006"></g>
+<g data-c="C125" class="editable ds-cam0000000000006"></g>
+<g data-c="D125" class="ds-cam0000000000006"></g>
+<g data-c="E125" class="ds-cam0000000000006"></g>
+<g data-c="C127" class="editable ds-cam0000000000006"></g>
+<g data-c="D127" class="ds-cam0000000000006"></g>
+<g data-c="E127" class="ds-cam0000000000006"></g>
+<g data-c="G127" class="ds-cam0000000000006"></g>
+<g data-c="H127" class="ds-cam0000000000006"></g>
+<g data-c="I127" class="ds-cam0000000000006"></g>
+<g data-c="C128" class="editable ds-cam0000000000006"></g>
+<g data-c="D128" class="ds-cam0000000000006"></g>
+<g data-c="E128" class="ds-cam0000000000006"></g>
+<g data-c="G128" class="ds-cam0000000000006"></g>
+<g data-c="H128" class="ds-cam0000000000006"></g>
+<g data-c="I128" class="ds-cam0000000000006"></g>
+<g data-c="B130" class="ds-cam0000000000006"></g>
+<g data-c="B132" class="ds-cam0000000000006"></g>
+<g data-c="C132" class="ds-cam0000000000006"></g>
+<g data-c="E132" class="ds-cam0000000000006"></g>
+<g data-c="B133" class="ds-cam0000000000006"></g>
+<g data-c="C133" class="ds-cam0000000000006"></g>
+<g data-c="E133" class="ds-cam0000000000006"></g>
+<g data-c="B137" class="ds-cam0000000000006"></g>
+<g data-c="F137" class="ds-cam0000000000006"><path marker-end="url(#cam000000020E905d3)" d="M 230.650223 295.547333 h 0" stroke="#0000FF" fill="none"/>
+</g>
+<g data-c="B138" class="ds-cam0000000000006"></g>
+<g data-c="D138" class="ds-cam0000000000006"></g>
+<g data-c="E138" class="ds-cam0000000000006"></g>
+<g data-c="F138" class="ds-cam0000000000006"><line x1="230.7" y1="295.5" x2="280.6" y2="295.4" stroke="#FF0000"  marker-end="url(#cam000000020E906d0)"/>
+</g>
+<g data-c="B139" class="ds-cam0000000000006"></g>
+<g data-c="D139" class="ds-cam0000000000006"></g>
+<g data-c="E139" class="ds-cam0000000000006"></g>
+<g data-c="F139" class="ds-cam0000000000006"><line x1="230.7" y1="295.5" x2="230.8" y2="345.5" stroke="#008000"  marker-end="url(#cam000000020E907d0)"/>
+</g>
+<g data-c="B143" class="ds-cam0000000000006"></g>
+<g data-c="C143" class="editable ds-cam0000000000006"></g>
+<g data-c="D143" class="ds-cam0000000000006"></g>
+<g data-c="G143" class="ds-cam0000000000006"></g>
+<g data-c="C150" class="editable ds-cam0000000000006"></g>
+<g data-c="D150" class="ds-cam0000000000006"></g>
+<g data-c="C152" class="editable ds-cam0000000000006"></g>
+<g data-c="D152" class="ds-cam0000000000006"></g>
+<g data-c="E152" class="ds-cam0000000000006"></g>
+<g data-c="C154" class="editable ds-cam0000000000006"></g>
+<g data-c="D154" class="ds-cam0000000000006"></g>
+<g data-c="E154" class="ds-cam0000000000006"></g>
+<g data-c="G154" class="ds-cam0000000000006"></g>
+<g data-c="H154" class="ds-cam0000000000006"></g>
+<g data-c="I154" class="ds-cam0000000000006"></g>
+<g data-c="C155" class="editable ds-cam0000000000006"></g>
+<g data-c="D155" class="ds-cam0000000000006"></g>
+<g data-c="E155" class="ds-cam0000000000006"></g>
+<g data-c="G155" class="ds-cam0000000000006"></g>
+<g data-c="H155" class="ds-cam0000000000006"></g>
+<g data-c="I155" class="ds-cam0000000000006"></g>
+<g data-c="B157" class="ds-cam0000000000006"></g>
+<g data-c="B159" class="ds-cam0000000000006"></g>
+<g data-c="C159" class="ds-cam0000000000006"></g>
+<g data-c="E159" class="ds-cam0000000000006"></g>
+<g data-c="B160" class="ds-cam0000000000006"></g>
+<g data-c="C160" class="ds-cam0000000000006"></g>
+<g data-c="E160" class="ds-cam0000000000006"></g>
+<g data-c="B164" class="ds-cam0000000000006"></g>
+<g data-c="F164" class="ds-cam0000000000006"><path marker-end="url(#cam000000020E905d3)" d="M 369.540741 294.651520 h 0" stroke="#0000FF" fill="none"/>
+</g>
+<g data-c="B165" class="ds-cam0000000000006"></g>
+<g data-c="D165" class="ds-cam0000000000006"></g>
+<g data-c="E165" class="ds-cam0000000000006"></g>
+<g data-c="F165" class="ds-cam0000000000006"><line x1="369.5" y1="294.7" x2="419.5" y2="294.5" stroke="#FF0000"  marker-end="url(#cam000000020E906d0)"/>
+</g>
+<g data-c="B166" class="ds-cam0000000000006"></g>
+<g data-c="D166" class="ds-cam0000000000006"></g>
+<g data-c="E166" class="ds-cam0000000000006"></g>
+<g data-c="F166" class="ds-cam0000000000006"><line x1="369.5" y1="294.7" x2="369.7" y2="344.7" stroke="#008000"  marker-end="url(#cam000000020E907d0)"/>
+</g>
+<g data-c="B170" class="ds-cam0000000000006"></g>
+<g data-c="C170" class="editable ds-cam0000000000006"></g>
+<g data-c="D170" class="ds-cam0000000000006"></g>
+<g data-c="G170" class="ds-cam0000000000006"></g>
+<g data-c="C177" class="editable ds-cam0000000000006"></g>
+<g data-c="D177" class="ds-cam0000000000006"></g>
+<g data-c="C179" class="editable ds-cam0000000000006"></g>
+<g data-c="D179" class="ds-cam0000000000006"></g>
+<g data-c="E179" class="ds-cam0000000000006"></g>
+<g data-c="C181" class="editable ds-cam0000000000006"></g>
+<g data-c="D181" class="ds-cam0000000000006"></g>
+<g data-c="E181" class="ds-cam0000000000006"></g>
+<g data-c="G181" class="ds-cam0000000000006"></g>
+<g data-c="H181" class="ds-cam0000000000006"></g>
+<g data-c="I181" class="ds-cam0000000000006"></g>
+<g data-c="C182" class="editable ds-cam0000000000006"></g>
+<g data-c="D182" class="ds-cam0000000000006"></g>
+<g data-c="E182" class="ds-cam0000000000006"></g>
+<g data-c="G182" class="ds-cam0000000000006"></g>
+<g data-c="H182" class="ds-cam0000000000006"></g>
+<g data-c="I182" class="ds-cam0000000000006"></g>
+<g data-c="B184" class="ds-cam0000000000006"></g>
+<g data-c="B186" class="ds-cam0000000000006"></g>
+<g data-c="C186" class="ds-cam0000000000006"></g>
+<g data-c="E186" class="ds-cam0000000000006"></g>
+<g data-c="B187" class="ds-cam0000000000006"></g>
+<g data-c="C187" class="ds-cam0000000000006"></g>
+<g data-c="E187" class="ds-cam0000000000006"></g>
+<g data-c="B191" class="ds-cam0000000000006"></g>
+<g data-c="F191" class="ds-cam0000000000006"><path marker-end="url(#cam000000020E905d3)" d="M 509.577301 294.265900 h 0" stroke="#0000FF" fill="none"/>
+</g>
+<g data-c="B192" class="ds-cam0000000000006"></g>
+<g data-c="D192" class="ds-cam0000000000006"></g>
+<g data-c="E192" class="ds-cam0000000000006"></g>
+<g data-c="F192" class="ds-cam0000000000006"><line x1="509.6" y1="294.3" x2="559.6" y2="294.1" stroke="#FF0000"  marker-end="url(#cam000000020E906d0)"/>
+</g>
+<g data-c="B193" class="ds-cam0000000000006"></g>
+<g data-c="D193" class="ds-cam0000000000006"></g>
+<g data-c="E193" class="ds-cam0000000000006"></g>
+<g data-c="F193" class="ds-cam0000000000006"><line x1="509.6" y1="294.3" x2="509.8" y2="344.3" stroke="#008000"  marker-end="url(#cam000000020E907d0)"/>
+</g>
+<g data-c="B197" class="ds-cam0000000000006"></g>
+<g data-c="C197" class="editable ds-cam0000000000006"></g>
+<g data-c="D197" class="ds-cam0000000000006"></g>
+<g data-c="G197" class="ds-cam0000000000006"></g>
+<g data-c="C204" class="editable ds-cam0000000000006"></g>
+<g data-c="D204" class="ds-cam0000000000006"></g>
+<g data-c="C206" class="editable ds-cam0000000000006"></g>
+<g data-c="D206" class="ds-cam0000000000006"></g>
+<g data-c="E206" class="ds-cam0000000000006"></g>
+<g data-c="C208" class="editable ds-cam0000000000006"></g>
+<g data-c="D208" class="ds-cam0000000000006"></g>
+<g data-c="E208" class="ds-cam0000000000006"></g>
+<g data-c="G208" class="ds-cam0000000000006"></g>
+<g data-c="H208" class="ds-cam0000000000006"></g>
+<g data-c="I208" class="ds-cam0000000000006"></g>
+<g data-c="C209" class="editable ds-cam0000000000006"></g>
+<g data-c="D209" class="ds-cam0000000000006"></g>
+<g data-c="E209" class="ds-cam0000000000006"></g>
+<g data-c="G209" class="ds-cam0000000000006"></g>
+<g data-c="H209" class="ds-cam0000000000006"></g>
+<g data-c="I209" class="ds-cam0000000000006"></g>
+<g data-c="B211" class="ds-cam0000000000006"></g>
+<g data-c="B213" class="ds-cam0000000000006"></g>
+<g data-c="C213" class="ds-cam0000000000006"></g>
+<g data-c="E213" class="ds-cam0000000000006"></g>
+<g data-c="B214" class="ds-cam0000000000006"></g>
+<g data-c="C214" class="ds-cam0000000000006"></g>
+<g data-c="E214" class="ds-cam0000000000006"></g>
+<g data-c="B218" class="ds-cam0000000000006"></g>
+<g data-c="F218" class="ds-cam0000000000006"><path marker-end="url(#cam000000020E905d3)" d="M 648.181946 294.142914 h 0" stroke="#0000FF" fill="none"/>
+</g>
+<g data-c="B219" class="ds-cam0000000000006"></g>
+<g data-c="D219" class="ds-cam0000000000006"></g>
+<g data-c="E219" class="ds-cam0000000000006"></g>
+<g data-c="F219" class="ds-cam0000000000006"><line x1="648.2" y1="294.1" x2="698.2" y2="294" stroke="#FF0000"  marker-end="url(#cam000000020E906d0)"/>
+</g>
+<g data-c="B220" class="ds-cam0000000000006"></g>
+<g data-c="D220" class="ds-cam0000000000006"></g>
+<g data-c="E220" class="ds-cam0000000000006"></g>
+<g data-c="F220" class="ds-cam0000000000006"><line x1="648.2" y1="294.1" x2="648.4" y2="344.1" stroke="#008000"  marker-end="url(#cam000000020E907d0)"/>
+</g>
+<g data-c="B224" class="ds-cam0000000000006"></g>
+<g data-c="C224" class="editable ds-cam0000000000006"></g>
+<g data-c="D224" class="ds-cam0000000000006"></g>
+<g data-c="G224" class="ds-cam0000000000006"></g>
+<g data-c="E262" class="ds-cam0000000000006"></g>
+<g data-c="D266" class="ds-cam0000000000006"></g>
+</svg>

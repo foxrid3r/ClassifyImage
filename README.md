@@ -13,10 +13,13 @@ ClassifyImage is a small desktop GUI for manually reviewing images, assigning ea
 - Zoom with the mouse wheel and pan responsively by dragging, using pixel-preserving nearest-neighbor scaling.
 - Double-click the mouse wheel to reset zoom and pan and fit the image to the viewing window.
 - Automatically display an optional same-named SVG overlay (for example, `photo.svg` over `photo.png`).
+- Show or hide individual SVG graphics with **Elements…**; selections carry across matching overlays.
+- Hover over the image to read zero-based pixel coordinates and original channel values, unaffected by overlays.
+- Select an SVG point or line endpoint and lock it to the viewer while navigating or playing images.
 - Set one screen-pixel line width for all stroked geometry, independent of image size and zoom, with proportionally scaled SVG markers and arrowheads.
 - Set one screen-pixel text size for SVG labels, independent of image size and zoom.
 - Automatically disable SVG sizing controls while the overlay is hidden.
-- Play images automatically with a configurable delay and next-image prefetching for faster transitions.
+- Play images at the current zoom and pan, with a configurable delay and next-image prefetching. Zoom and drag during playback to adjust the view.
 - Inspect grouped file, image, embedded, and EXIF metadata in a collapsible side panel that follows navigation.
 - Choose an explicit Move or Copy action for classified images, then transfer them into class-named subfolders with progress feedback.
 - Warn before overwriting an existing destination filename.
@@ -60,6 +63,9 @@ Without activating the virtual environment, run the generated launcher directly:
 
 ## Development
 
+Sample BMP images and matching SVG overlays are in [`examples/images/`](examples/images/).
+See the [example instructions](examples/README.md) for trying overlays and anchor locking.
+
 ```powershell
 python -m pip install -e ".[dev]"
 python -m ruff check src tests
@@ -71,6 +77,9 @@ python -m pytest
 
 ```text
 ClassifyImage/
+├── examples/
+│   ├── images/
+│   └── README.md
 ├── src/
 │   └── classify_image/
 │       ├── __init__.py
@@ -84,5 +93,36 @@ ClassifyImage/
 ```
 
 ## Notes
+
+### Trying SVG anchor lock
+
+Click **Select Anchor**, select a row to highlight its location on the current image, then click
+**Lock anchor**. The selected point stays at its current screen position.
+Drag the image to move the pinned location. Zoom and the pinned location persist
+when advancing, including during playback. **Unlock** or double-clicking the mouse wheel restores
+normal fit-to-window viewing. If an anchor is missing, playback stops and the status explains why.
+
+The first implementation supports identified circles/ellipses, line endpoints, and zero-length
+`M x y h 0` point paths such as those in the sample files. Elements are matched by `id` or their
+parent group's `data-c` label and position within that group. Only anchors inside the SVG viewBox
+are listed; marker definitions are excluded. Standard group transforms are supported. Nested SVG
+viewports, arbitrary path geometry, and CSS-controlled visibility are not fully supported.
+Use overlays whose viewport aspect ratio matches the raster, as in the provided examples.
+
+**Elements…** lists graphics rendered inside the SVG viewBox, including shapes, text, images, and uses.
+Names follow the anchor picker format, using the element ID or parent group's label.
+Selecting rows highlights their locations with yellow bounds and crosshairs, even when hidden.
+Graphics that partly intersect the viewBox remain available; fully outside or clipped graphics are omitted.
+Select one or more rows and click **Show selected** or **Hide selected**, or restore the current
+overlay with **Show all**. Graphics match across frames by SVG ID, falling back to document position
+for elements without IDs. Selecting a different folder resets these choices. Source SVG files are unchanged.
+The pixel readout reports the source image's native mode and bands (palette images report their index).
+
+To run branch source directly when the virtual environment contains an older installed release:
+
+```powershell
+$env:PYTHONPATH = 'src'
+.\.venv\Scripts\python.exe -m classify_image
+```
 
 Classifications are held in memory until files are moved. Selecting a different source folder clears the current classification session.
