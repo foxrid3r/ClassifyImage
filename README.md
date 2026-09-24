@@ -97,8 +97,8 @@ ClassifyImage/
 ### Trying SVG anchor lock
 
 Click **Select Anchor**, select a row to highlight its location on the current image, then click
-**Lock anchor**. The default **Stay in place** keeps the selected point at its current screen position;
-choose **Move to center** to center it instead. Drag the image to move the pinned location. Zoom and the pinned location persist
+**Lock anchor**. The selected point stays at its current screen position.
+Drag the image to move the pinned location. Zoom and the pinned location persist
 when advancing, including during playback. **Unlock** or double-clicking the mouse wheel restores
 normal fit-to-window viewing. If an anchor is missing, playback stops and the status explains why.
 
@@ -109,7 +109,10 @@ are listed; marker definitions are excluded. Standard group transforms are suppo
 viewports, arbitrary path geometry, and CSS-controlled visibility are not fully supported.
 Use overlays whose viewport aspect ratio matches the raster, as in the provided examples.
 
-**Elements…** lists graphics outside SVG definitions, including shapes, text, images, and uses.
+**Elements…** lists graphics rendered inside the SVG viewBox, including shapes, text, images, and uses.
+Names follow the anchor picker format, using the element ID or parent group's label.
+Selecting rows highlights their locations with yellow bounds and crosshairs, even when hidden.
+Graphics that partly intersect the viewBox remain available; fully outside or clipped graphics are omitted.
 Select one or more rows and click **Show selected** or **Hide selected**, or restore the current
 overlay with **Show all**. Graphics match across frames by SVG ID, falling back to document position
 for elements without IDs. Selecting a different folder resets these choices. Source SVG files are unchanged.

@@ -30,18 +30,19 @@ def svg_graphics(root: ElementTree.Element) -> list[tuple[str, str, ElementTree.
     """Identify visible-tree graphics, excluding reusable definitions and text children."""
     result = []
 
-    def visit(element: ElementTree.Element, path: str) -> None:
+    def visit(element: ElementTree.Element, path: str, identity: str = "") -> None:
         tag = element.tag.rsplit("}", 1)[-1]
         if tag in {"defs", "clipPath", "mask", "marker", "pattern", "symbol"}:
             return
+        identity = element.get("id") or element.get("data-c") or identity
         if tag in SVG_GRAPHICS:
             identifier = element.get("id")
             key = f"id:{identifier}" if identifier else f"path:{path}"
-            label = f"{tag}: {identifier or element.get('data-c') or path}"
+            label = f"{identity or path} — {tag}"
             result.append((key, label, element))
             return
         for index, child in enumerate(element):
-            visit(child, f"{path}/{index}")
+            visit(child, f"{path}/{index}", identity)
 
     visit(root, "0")
     return result
@@ -275,6 +276,50 @@ def svg_with_line_width(
     return ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
+def visible_svg_graphics(
+    svg_path: Path, size: tuple[int, int], line_width: float = 1, text_size: float = 16
+) -> list[tuple[str, str, tuple[float, float, float, float]]]:
+    """Find rendered bounds within the viewport, including transforms, clipping and markers.
+
+    Inspect source visibility, not the user's hidden-element choices, so hidden rows
+    remain available to show again. Bounds are fractions of the rendered viewport.
+    """
+    import resvg_py
+
+    # Preserve document-position keys before svg_with_line_width inserts its style.
+    originals = svg_graphics(ElementTree.parse(svg_path).getroot())
+    root = ElementTree.fromstring(svg_with_line_width(svg_path, line_width, size, text_size))
+    graphics = svg_graphics(root)
+    parents = {child: (parent, index) for parent in root.iter() for index, child in enumerate(parent)}
+    namespace = root.tag.partition("}")[0] + "}" if "}" in root.tag else ""
+    wrappers = []
+    # Keep other graphics available as references (e.g. <use href="#shape">),
+    # while preventing them from painting directly during each isolated render.
+    for _, _, element in graphics:
+        parent, index = parents[element]
+        wrapper = ElementTree.Element(f"{namespace}defs")
+        wrapper.append(element)
+        parent[index] = wrapper
+        wrappers.append(wrapper)
+    result = []
+    for (key, label, _), (_, _, element), wrapper in zip(originals, graphics, wrappers):
+        parent, index = parents[element]
+        parent[index] = element
+        png = resvg_py.svg_to_bytes(
+            svg_string=ElementTree.tostring(root, encoding="unicode"),
+            width=size[0],
+            height=size[1],
+            resources_dir=os.fspath(svg_path.parent),
+        )
+        with Image.open(BytesIO(png)) as rendered:
+            bounds = rendered.convert("RGBA").getchannel("A").getbbox()
+            if bounds is not None:
+                left, top, right, bottom = bounds
+                result.append((key, label, (left / size[0], top / size[1], right / size[0], bottom / size[1])))
+        parent[index] = wrapper
+    return result
+
+
 class ImageClassifierApp:
     """Tkinter GUI for interactively sorting images into class folders."""
 
@@ -295,6 +340,7 @@ class ImageClassifierApp:
         self.anchor_key = None
         self.anchors = []
         self.anchor_preview = None
+        self.element_previews = []
         self.anchor_window = None
         self.anchor_status = tk.StringVar(value="Anchor off")
         self.offset_x = 0
@@ -665,22 +711,18 @@ class ImageClassifierApp:
 
         def apply():
             if self.anchor_preview is not None:
-                self.lock_anchor(self.anchor_preview, stay_in_place=position.get() == "Stay in place")
+                self.lock_anchor(self.anchor_preview)
                 close()
 
         tree.bind("<<TreeviewSelect>>", preview)
         buttons = ttk.Frame(window)
         buttons.grid(row=3, column=0, pady=10)
-        position = tk.StringVar(value="Stay in place")
-        ttk.Combobox(
-            buttons, textvariable=position, values=("Stay in place", "Move to center"), state="readonly", width=16
-        ).pack(side=tk.LEFT, padx=5)
         ttk.Button(buttons, text="Lock anchor", command=apply).pack(side=tk.LEFT, padx=5)
         ttk.Button(buttons, text="Cancel", command=close).pack(side=tk.LEFT, padx=5)
         window.protocol("WM_DELETE_WINDOW", close)
 
-    def lock_anchor(self, anchor, *, stay_in_place: bool = True) -> None:
-        if stay_in_place and self.image_bounds is not None:
+    def lock_anchor(self, anchor) -> None:
+        if self.image_bounds is not None:
             left, top, width, height = self.image_bounds
             self.offset_x = left + anchor.x * width - self.canvas.winfo_width() // 2
             self.offset_y = top + anchor.y * height - self.canvas.winfo_height() // 2
@@ -694,30 +736,63 @@ class ImageClassifierApp:
             messagebox.showinfo("SVG Elements", "The current image has no SVG overlay.")
             return
         try:
-            elements = svg_graphics(ElementTree.parse(self.overlay_path).getroot())
-        except (OSError, ElementTree.ParseError) as exc:
+            viewport = _svg_viewport_size(ElementTree.parse(self.overlay_path).getroot())
+            if viewport is None:
+                messagebox.showinfo("SVG Elements", "The SVG has no usable viewport.")
+                return
+            scale = 1024 / max(viewport)
+            size = (max(1, round(viewport[0] * scale)), max(1, round(viewport[1] * scale)))
+            elements = visible_svg_graphics(self.overlay_path, size, self.overlay_line_width, self.overlay_text_size)
+        except Exception as exc:  # noqa: BLE001 -- SVG renderer errors vary by backend.
             messagebox.showerror("SVG Elements", str(exc))
             return
         window = tk.Toplevel(self.root)
         window.title("SVG element visibility")
-        window.geometry("530x400")
+        window.geometry("650x400")
         window.transient(self.root)
         window.grab_set()
-        ttk.Label(window, text="Select elements to show or hide. Choices carry across matching overlays.").pack(pady=8)
+        ttk.Label(window, text="Select an element to highlight its location in the image.").pack(pady=8)
         frame = ttk.Frame(window)
         frame.pack(fill=tk.BOTH, expand=True, padx=10)
-        tree = ttk.Treeview(frame, columns=("visible",), selectmode="extended")
+        tree = ttk.Treeview(frame, columns=("x", "y", "visible"), selectmode="extended")
         tree.heading("#0", text="Graphic element")
+        tree.column("#0", width=280)
+        for column, label in (("x", "Image X (%)"), ("y", "Image Y (%)")):
+            tree.heading(column, text=label)
+            tree.column(column, width=90, stretch=False)
         tree.heading("visible", text="Visible")
         tree.column("visible", width=65, stretch=False)
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         tree.pack(fill=tk.BOTH, expand=True)
-        for index, (key, label, _) in enumerate(elements):
+        for index, (key, label, bounds) in enumerate(elements):
+            left, top, right, bottom = bounds
             tree.insert(
-                "", "end", iid=str(index), text=label, values=("No" if key in self.hidden_svg_elements else "Yes",)
+                "",
+                "end",
+                iid=str(index),
+                text=label,
+                values=(
+                    f"{(left + right) * 50:.3f}",
+                    f"{(top + bottom) * 50:.3f}",
+                    "No" if key in self.hidden_svg_elements else "Yes",
+                ),
             )
+        if not elements:
+            ttk.Label(window, text="No rendered graphics inside this SVG viewBox.").pack(pady=5)
+
+        def preview(_event=None):
+            self.element_previews = [elements[int(item)][2] for item in tree.selection()]
+            self.update_canvas()
+
+        def close():
+            self.element_previews = []
+            window.destroy()
+            self.update_canvas()
+
+        tree.bind("<<TreeviewSelect>>", preview)
+        window.protocol("WM_DELETE_WINDOW", close)
 
         def change(visible: bool, *, all_elements: bool = False) -> None:
             for item in tree.get_children() if all_elements else tree.selection():
@@ -735,7 +810,7 @@ class ImageClassifierApp:
         ttk.Button(buttons, text="Show selected", command=lambda: change(True)).pack(side=tk.LEFT, padx=4)
         ttk.Button(buttons, text="Hide selected", command=lambda: change(False)).pack(side=tk.LEFT, padx=4)
         ttk.Button(buttons, text="Show all", command=lambda: change(True, all_elements=True)).pack(side=tk.LEFT, padx=4)
-        ttk.Button(buttons, text="Close", command=window.destroy).pack(side=tk.LEFT, padx=4)
+        ttk.Button(buttons, text="Close", command=close).pack(side=tk.LEFT, padx=4)
 
     def _get_rendered_overlay(self, size: tuple[int, int]) -> ImageTk.PhotoImage | None:
         if self.overlay_path is None:
@@ -857,6 +932,17 @@ class ImageClassifierApp:
         if self.anchor_preview is not None:
             x = center_x + (self.anchor_preview.x - 0.5) * new_width
             y = center_y + (self.anchor_preview.y - 0.5) * new_height
+            self.canvas.create_oval(x - 8, y - 8, x + 8, y + 8, outline="yellow", width=2)
+            self.canvas.create_line(x - 14, y, x + 14, y, fill="yellow")
+            self.canvas.create_line(x, y - 14, x, y + 14, fill="yellow")
+
+        for left, top, right, bottom in self.element_previews:
+            x1 = center_x + (left - 0.5) * new_width
+            y1 = center_y + (top - 0.5) * new_height
+            x2 = center_x + (right - 0.5) * new_width
+            y2 = center_y + (bottom - 0.5) * new_height
+            x, y = (x1 + x2) / 2, (y1 + y2) / 2
+            self.canvas.create_rectangle(x1 - 3, y1 - 3, x2 + 3, y2 + 3, outline="yellow", width=2)
             self.canvas.create_oval(x - 8, y - 8, x + 8, y + 8, outline="yellow", width=2)
             self.canvas.create_line(x - 14, y, x + 14, y, fill="yellow")
             self.canvas.create_line(x, y - 14, x, y + 14, fill="yellow")
