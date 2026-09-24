@@ -13,11 +13,13 @@ ClassifyImage is a small desktop GUI for manually reviewing images, assigning ea
 - Zoom with the mouse wheel and pan responsively by dragging, using pixel-preserving nearest-neighbor scaling.
 - Double-click the mouse wheel to reset zoom and pan and fit the image to the viewing window.
 - Automatically display an optional same-named SVG overlay (for example, `photo.svg` over `photo.png`).
+- Show or hide individual SVG graphics with **Elements…**; selections carry across matching overlays.
+- Hover over the image to read zero-based pixel coordinates and original channel values, unaffected by overlays.
 - Select an SVG point or line endpoint and lock it to the viewer while navigating or playing images.
 - Set one screen-pixel line width for all stroked geometry, independent of image size and zoom, with proportionally scaled SVG markers and arrowheads.
 - Set one screen-pixel text size for SVG labels, independent of image size and zoom.
 - Automatically disable SVG sizing controls while the overlay is hidden.
-- Play images automatically with a configurable delay and next-image prefetching for faster transitions.
+- Play images at the current zoom and pan, with a configurable delay and next-image prefetching. Zoom and drag during playback to adjust the view.
 - Inspect grouped file, image, embedded, and EXIF metadata in a collapsible side panel that follows navigation.
 - Choose an explicit Move or Copy action for classified images, then transfer them into class-named subfolders with progress feedback.
 - Warn before overwriting an existing destination filename.
@@ -95,7 +97,8 @@ ClassifyImage/
 ### Trying SVG anchor lock
 
 Click **Select Anchor**, select a row to highlight its location on the current image, then click
-**Lock to center**. Drag the image to move the pinned location. Zoom and the pinned location persist
+**Lock anchor**. The default **Stay in place** keeps the selected point at its current screen position;
+choose **Move to center** to center it instead. Drag the image to move the pinned location. Zoom and the pinned location persist
 when advancing, including during playback. **Unlock** or double-clicking the mouse wheel restores
 normal fit-to-window viewing. If an anchor is missing, playback stops and the status explains why.
 
@@ -105,6 +108,12 @@ parent group's `data-c` label and position within that group. Only anchors insid
 are listed; marker definitions are excluded. Standard group transforms are supported. Nested SVG
 viewports, arbitrary path geometry, and CSS-controlled visibility are not fully supported.
 Use overlays whose viewport aspect ratio matches the raster, as in the provided examples.
+
+**Elements…** lists graphics outside SVG definitions, including shapes, text, images, and uses.
+Select one or more rows and click **Show selected** or **Hide selected**, or restore the current
+overlay with **Show all**. Graphics match across frames by SVG ID, falling back to document position
+for elements without IDs. Selecting a different folder resets these choices. Source SVG files are unchanged.
+The pixel readout reports the source image's native mode and bands (palette images report their index).
 
 To run branch source directly when the virtual environment contains an older installed release:
 

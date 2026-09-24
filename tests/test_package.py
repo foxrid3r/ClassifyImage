@@ -18,7 +18,7 @@ from classify_image.app import (
 
 
 def test_version() -> None:
-    assert __version__ == "0.3.2"
+    assert __version__ == "0.3.3"
 
 
 def test_supported_extensions() -> None:

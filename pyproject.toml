@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "classify-image"
-version = "0.3.2"
+version = "0.3.3"
 description = "A desktop GUI for manually classifying images into folders."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -29,3 +29,6 @@ where = ["src"]
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

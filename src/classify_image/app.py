@@ -23,6 +23,28 @@ SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 MAX_CLASSES = 10
 MIN_PLAY_DELAY_MS = 10
 INHERITED_FONT_PROPERTIES = ("font-family", "font-size", "font-style", "font-weight")
+SVG_GRAPHICS = {"path", "line", "polyline", "polygon", "rect", "circle", "ellipse", "text", "image", "use"}
+
+
+def svg_graphics(root: ElementTree.Element) -> list[tuple[str, str, ElementTree.Element]]:
+    """Identify visible-tree graphics, excluding reusable definitions and text children."""
+    result = []
+
+    def visit(element: ElementTree.Element, path: str) -> None:
+        tag = element.tag.rsplit("}", 1)[-1]
+        if tag in {"defs", "clipPath", "mask", "marker", "pattern", "symbol"}:
+            return
+        if tag in SVG_GRAPHICS:
+            identifier = element.get("id")
+            key = f"id:{identifier}" if identifier else f"path:{path}"
+            label = f"{tag}: {identifier or element.get('data-c') or path}"
+            result.append((key, label, element))
+            return
+        for index, child in enumerate(element):
+            visit(child, f"{path}/{index}")
+
+    visit(root, "0")
+    return result
 
 
 def _display_value(value: object, limit: int = 300) -> str:
@@ -217,9 +239,14 @@ def svg_with_line_width(
     line_width: float,
     render_size: tuple[int, int] | None = None,
     text_size: float | None = None,
+    hidden_elements: set[str] | None = None,
 ) -> bytes:
     """Return SVG data with uniform screen-pixel stroke and text sizes."""
     root = ElementTree.parse(svg_path).getroot()
+    for key, _, element in svg_graphics(root):
+        if hidden_elements and key in hidden_elements:
+            element.set("display", "none")
+            element.set("style", element.get("style", "") + ";display:none !important")
     _materialize_svg_font_styles(root)
     source_line_width = line_width
     source_text_size = text_size
@@ -281,6 +308,10 @@ class ImageClassifierApp:
         self.overlay_cache: OrderedDict[tuple[int, int], ImageTk.PhotoImage] = OrderedDict()
         self.photo: ImageTk.PhotoImage | None = None
         self.overlay_enabled = tk.BooleanVar(value=True)
+        self.hidden_svg_elements: set[str] = set()
+        self.pixel_status = tk.StringVar(value="Hover over the image to inspect pixels")
+        self.image_bounds = None
+        self.pixel_pointer = None
         self.overlay_line_width = 1.0
         self.overlay_line_width_var = tk.StringVar(value="1")
         self.overlay_text_size = 16.0
@@ -364,7 +395,10 @@ class ImageClassifierApp:
         self.overlay_text_size_spinbox.bind("<FocusOut>", self.set_overlay_text_size)
         ttk.Button(overlay_control_frame, text="Select Anchor", command=self.select_anchor).pack(side=tk.LEFT, padx=10)
         ttk.Button(overlay_control_frame, text="Unlock", command=self.unlock_anchor).pack(side=tk.LEFT)
+        self.elements_button = ttk.Button(overlay_control_frame, text="Elements…", command=self.select_svg_elements)
+        self.elements_button.pack(side=tk.LEFT, padx=5)
         ttk.Label(self.root, textvariable=self.anchor_status).pack()
+        ttk.Label(self.root, textvariable=self.pixel_status).pack()
 
         self.content_pane = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
         self.content_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -379,6 +413,8 @@ class ImageClassifierApp:
         self.canvas.bind("<Double-Button-2>", self.fit_image_to_window)
         self.canvas.bind("<ButtonPress-1>", self.start_pan)
         self.canvas.bind("<B1-Motion>", self.pan_image)
+        self.canvas.bind("<Motion>", self.inspect_pixel)
+        self.canvas.bind("<Leave>", self.clear_pixel)
         self.canvas.bind("<Configure>", lambda _event: self.update_canvas())
 
         self.details_frame = ttk.Frame(self.content_pane, padding=(8, 0, 0, 0))
@@ -462,6 +498,7 @@ class ImageClassifierApp:
         self.stop_playback()
         self._clear_prefetch()
         self.folder_path = Path(folder_selected)
+        self.hidden_svg_elements.clear()
         self.directory_label.config(text=f"{self.folder_path}")
         self.load_images()
         self.anchor_key = None
@@ -554,6 +591,8 @@ class ImageClassifierApp:
 
     def _clear_image_display(self) -> None:
         self.image = None
+        self.image_bounds = None
+        self.clear_pixel()
         self.rendered_image_cache = None
         self.overlay_path = None
         self.overlay_cache.clear()
@@ -626,16 +665,77 @@ class ImageClassifierApp:
 
         def apply():
             if self.anchor_preview is not None:
-                self.anchor_key = self.anchor_preview.key
-                self.offset_x = self.offset_y = 0
+                self.lock_anchor(self.anchor_preview, stay_in_place=position.get() == "Stay in place")
                 close()
 
         tree.bind("<<TreeviewSelect>>", preview)
         buttons = ttk.Frame(window)
         buttons.grid(row=3, column=0, pady=10)
-        ttk.Button(buttons, text="Lock to center", command=apply).pack(side=tk.LEFT, padx=5)
+        position = tk.StringVar(value="Stay in place")
+        ttk.Combobox(
+            buttons, textvariable=position, values=("Stay in place", "Move to center"), state="readonly", width=16
+        ).pack(side=tk.LEFT, padx=5)
+        ttk.Button(buttons, text="Lock anchor", command=apply).pack(side=tk.LEFT, padx=5)
         ttk.Button(buttons, text="Cancel", command=close).pack(side=tk.LEFT, padx=5)
         window.protocol("WM_DELETE_WINDOW", close)
+
+    def lock_anchor(self, anchor, *, stay_in_place: bool = True) -> None:
+        if stay_in_place and self.image_bounds is not None:
+            left, top, width, height = self.image_bounds
+            self.offset_x = left + anchor.x * width - self.canvas.winfo_width() // 2
+            self.offset_y = top + anchor.y * height - self.canvas.winfo_height() // 2
+        else:
+            self.offset_x = self.offset_y = 0
+        self.anchor_key = anchor.key
+
+    def select_svg_elements(self) -> None:
+        self.stop_playback()
+        if self.overlay_path is None:
+            messagebox.showinfo("SVG Elements", "The current image has no SVG overlay.")
+            return
+        try:
+            elements = svg_graphics(ElementTree.parse(self.overlay_path).getroot())
+        except (OSError, ElementTree.ParseError) as exc:
+            messagebox.showerror("SVG Elements", str(exc))
+            return
+        window = tk.Toplevel(self.root)
+        window.title("SVG element visibility")
+        window.geometry("530x400")
+        window.transient(self.root)
+        window.grab_set()
+        ttk.Label(window, text="Select elements to show or hide. Choices carry across matching overlays.").pack(pady=8)
+        frame = ttk.Frame(window)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10)
+        tree = ttk.Treeview(frame, columns=("visible",), selectmode="extended")
+        tree.heading("#0", text="Graphic element")
+        tree.heading("visible", text="Visible")
+        tree.column("visible", width=65, stretch=False)
+        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(fill=tk.BOTH, expand=True)
+        for index, (key, label, _) in enumerate(elements):
+            tree.insert(
+                "", "end", iid=str(index), text=label, values=("No" if key in self.hidden_svg_elements else "Yes",)
+            )
+
+        def change(visible: bool, *, all_elements: bool = False) -> None:
+            for item in tree.get_children() if all_elements else tree.selection():
+                key = elements[int(item)][0]
+                if visible:
+                    self.hidden_svg_elements.discard(key)
+                else:
+                    self.hidden_svg_elements.add(key)
+                tree.set(item, "visible", "Yes" if visible else "No")
+            self.overlay_cache.clear()
+            self.update_canvas()
+
+        buttons = ttk.Frame(window)
+        buttons.pack(pady=8)
+        ttk.Button(buttons, text="Show selected", command=lambda: change(True)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(buttons, text="Hide selected", command=lambda: change(False)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(buttons, text="Show all", command=lambda: change(True, all_elements=True)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(buttons, text="Close", command=window.destroy).pack(side=tk.LEFT, padx=4)
 
     def _get_rendered_overlay(self, size: tuple[int, int]) -> ImageTk.PhotoImage | None:
         if self.overlay_path is None:
@@ -654,6 +754,7 @@ class ImageClassifierApp:
                     self.overlay_line_width,
                     size,
                     self.overlay_text_size,
+                    self.hidden_svg_elements,
                 ).decode("utf-8"),
                 width=size[0],
                 height=size[1],
@@ -695,6 +796,7 @@ class ImageClassifierApp:
         state = "normal" if self.overlay_enabled.get() else "disabled"
         self.overlay_line_width_spinbox.config(state=state)
         self.overlay_text_size_spinbox.config(state=state)
+        self.elements_button.config(state=state)
         self.update_canvas()
 
     def set_overlay_text_size(self, _event: tk.Event | None = None) -> None:
@@ -743,7 +845,10 @@ class ImageClassifierApp:
             self.anchor_status.set("Anchor off")
 
         self.canvas.delete("all")
-        self.canvas.create_image(center_x, center_y, image=self.photo, anchor=tk.CENTER)
+        raster_item = self.canvas.create_image(center_x, center_y, image=self.photo, anchor=tk.CENTER)
+        left, top, _, _ = self.canvas.bbox(raster_item)
+        self.image_bounds = (left, top, new_width, new_height)
+        self.inspect_pixel()
         if self.overlay_enabled.get():
             rendered_overlay = self._get_rendered_overlay((new_width, new_height))
             if rendered_overlay is not None:
@@ -784,6 +889,30 @@ class ImageClassifierApp:
         self.start_x = event.x
         self.start_y = event.y
         self.canvas.move("all", delta_x, delta_y)
+        if self.image_bounds is not None:
+            left, top, width, height = self.image_bounds
+            self.image_bounds = (left + delta_x, top + delta_y, width, height)
+        self.inspect_pixel(event)
+
+    def clear_pixel(self, _event: tk.Event | None = None) -> None:
+        self.pixel_pointer = None
+        self.pixel_status.set("Hover over the image to inspect pixels")
+
+    def inspect_pixel(self, event: tk.Event | None = None) -> None:
+        if event is not None:
+            self.pixel_pointer = (event.x, event.y)
+        self.pixel_status.set("Hover over the image to inspect pixels")
+        if self.image is None or self.image_bounds is None or self.pixel_pointer is None:
+            return
+        left, top, width, height = self.image_bounds
+        x, y = self.pixel_pointer
+        if not (left <= x < left + width and top <= y < top + height):
+            return
+        px = int((x - left) * self.image.width / width)
+        py = int((y - top) * self.image.height / height)
+        value = self.image.getpixel((px, py))
+        bands = ", ".join(self.image.getbands())
+        self.pixel_status.set(f"Pixel ({px}, {py}) · {self.image.mode} [{bands}]: {value}")
 
     def show_next_image(self) -> None:
         self.stop_playback()
@@ -1056,7 +1185,6 @@ class ImageClassifierApp:
 
         if self.current_index < len(self.images) - 1:
             self.current_index += 1
-            self.reset_view()
             self.show_image()
             if self.is_playing:
                 self.play_after_id = self.root.after(self.play_delay_ms, self.play_images)
