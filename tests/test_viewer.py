@@ -26,16 +26,24 @@ def test_hidden_graphics_render_without_changing_source_or_definitions(tmp_path)
     assert path.read_text() == source
 
 
-@pytest.mark.parametrize("mode, value", [("RGB", (12, 34, 56)), ("L", 123), ("I;16", 12345), ("P", 7)])
-def test_pixel_values_use_original_image_and_transformed_bounds(mode, value):
+@pytest.mark.parametrize(
+    "mode, value, label",
+    [
+        ("RGB", (12, 34, 56), "RGB"),
+        ("RGBA", (12, 34, 56, 255), "RGBA"),
+        ("L", 123, "Gray"),
+        ("I;16", 12345, "I;16"),
+        ("P", 7, "Index"),
+    ],
+)
+def test_pixel_values_use_original_image_and_transformed_bounds(mode, value, label):
     app = ImageClassifierApp.__new__(ImageClassifierApp)
     app.image = Image.new(mode, (4, 2))
     app.image.putpixel((2, 1), value)
     app.image_bounds = (-10, 20, 40, 20)
     app.pixel_status = Mock()
     app.inspect_pixel(SimpleNamespace(x=15, y=35))
-    assert f"Pixel (2, 1) · {mode}" in app.pixel_status.set.call_args.args[0]
-    assert app.pixel_status.set.call_args.args[0].endswith(str(value))
+    assert app.pixel_status.set.call_args.args[0] == f"(2, 1) · {label}: {value}"
     app.inspect_pixel(SimpleNamespace(x=30, y=35))
     assert app.pixel_status.set.call_args.args[0] == "Hover over the image to inspect pixels"
     app.clear_pixel()
@@ -128,4 +136,4 @@ def test_pan_updates_pixel_mapping():
     app.pixel_status = Mock()
     app.pan_image(SimpleNamespace(x=25, y=30))
     assert app.image_bounds == (25, 30, 100, 100)
-    assert app.pixel_status.set.call_args.args[0] == "Pixel (0, 0) · L [L]: 42"
+    assert app.pixel_status.set.call_args.args[0] == "(0, 0) · Gray: 42"

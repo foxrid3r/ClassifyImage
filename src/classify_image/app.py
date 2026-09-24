@@ -667,6 +667,15 @@ class ImageClassifierApp:
         self.reset_view()
         self.update_canvas()
 
+    def _center_dialog(self, window: tk.Toplevel, width: int, height: int) -> None:
+        """Place a new dialog at the center of the main window."""
+        window.withdraw()
+        self.root.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - width) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - height) // 2
+        window.geometry(f"{width}x{height}+{x}+{y}")
+        window.deiconify()
+
     def select_anchor(self) -> None:
         self.stop_playback()
         if self.anchor_window is not None:
@@ -675,8 +684,8 @@ class ImageClassifierApp:
         window = tk.Toplevel(self.root)
         self.anchor_window = window
         window.title("Select SVG Anchor")
-        window.geometry("530x320")
         window.transient(self.root)
+        self._center_dialog(window, 530, 320)
         window.grab_set()
         window.columnconfigure(0, weight=1)
         window.rowconfigure(1, weight=1)
@@ -748,8 +757,8 @@ class ImageClassifierApp:
             return
         window = tk.Toplevel(self.root)
         window.title("SVG element visibility")
-        window.geometry("650x400")
         window.transient(self.root)
+        self._center_dialog(window, 650, 400)
         window.grab_set()
         ttk.Label(window, text="Select an element to highlight its location in the image.").pack(pady=8)
         frame = ttk.Frame(window)
@@ -997,8 +1006,8 @@ class ImageClassifierApp:
         px = int((x - left) * self.image.width / width)
         py = int((y - top) * self.image.height / height)
         value = self.image.getpixel((px, py))
-        bands = ", ".join(self.image.getbands())
-        self.pixel_status.set(f"Pixel ({px}, {py}) · {self.image.mode} [{bands}]: {value}")
+        label = {"L": "Gray", "LA": "Gray+A", "1": "B/W", "P": "Index"}.get(self.image.mode, self.image.mode)
+        self.pixel_status.set(f"({px}, {py}) · {label}: {value}")
 
     def show_next_image(self) -> None:
         self.stop_playback()
