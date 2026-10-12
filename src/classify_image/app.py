@@ -1013,14 +1013,12 @@ class ImageClassifierApp:
         self.stop_playback()
         if self.images and self.current_index < len(self.images) - 1:
             self.current_index += 1
-            self.reset_view()
             self.show_image()
 
     def show_previous_image(self) -> None:
         self.stop_playback()
         if self.images and self.current_index > 0:
             self.current_index -= 1
-            self.reset_view()
             self.show_image()
 
     def reset_view(self) -> None:

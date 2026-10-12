@@ -127,6 +127,33 @@ def test_playback_preserves_user_view_without_anchor():
     app.root.after.assert_called_once_with(125, app.play_images)
 
 
+@pytest.mark.parametrize(
+    "method, start_index, expected_index",
+    [("show_next_image", 0, 1), ("show_previous_image", 1, 0)],
+)
+def test_manual_navigation_preserves_user_view(method, start_index, expected_index):
+    app = ImageClassifierApp.__new__(ImageClassifierApp)
+    app.root = Mock()
+    app.play_button = Mock()
+    app.is_playing = True
+    app.play_after_id = "pending-playback"
+    app.images = ["first.png", "second.png"]
+    app.current_index = start_index
+    app.anchor_key = None
+    app.zoom_factor = 3.5
+    app.offset_x, app.offset_y = 100, -50
+    app.show_image = Mock()
+
+    getattr(app, method)()
+
+    assert app.current_index == expected_index
+    assert (app.zoom_factor, app.offset_x, app.offset_y) == (3.5, 100, -50)
+    app.show_image.assert_called_once_with()
+    assert not app.is_playing
+    assert app.play_after_id is None
+    app.root.after_cancel.assert_called_once_with("pending-playback")
+
+
 def test_pan_updates_pixel_mapping():
     app = ImageClassifierApp.__new__(ImageClassifierApp)
     app.image = Image.new("L", (10, 10), 42)
