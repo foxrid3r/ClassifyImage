@@ -1,561 +1,324 @@
 from __future__ import annotations
 
 import os
-import re
-import shutil
-import tkinter as tk
 from collections import OrderedDict
-from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
-from concurrent.futures import wait as wait_for_futures
-from datetime import datetime
-from io import BytesIO
 from pathlib import Path
 from queue import Empty, SimpleQueue
-from tkinter import filedialog, messagebox, ttk
+from types import SimpleNamespace
 from xml.etree import ElementTree
 
-from PIL import ExifTags, Image, ImageTk
+from PIL import Image
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QSpinBox,
+    QSplitter,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
-from classify_image.anchors import svg_anchors
+from .anchors import svg_anchors
+from .core import (  # noqa: F401 -- retain the existing public helper imports.
+    MAX_CLASSES,
+    MIN_PLAY_DELAY_MS,
+    SUPPORTED_EXTENSIONS,
+    _svg_viewport_size,
+    fitted_size,
+    image_metadata,
+    matching_svg_path,
+    svg_graphics,
+    svg_with_line_width,
+    transfer_classified_files,
+    visible_svg_graphics,
+)
+from .icons import application_icon
 
-SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
-MAX_CLASSES = 10
-MIN_PLAY_DELAY_MS = 10
-INHERITED_FONT_PROPERTIES = ("font-family", "font-size", "font-style", "font-weight")
-SVG_GRAPHICS = {"path", "line", "polyline", "polygon", "rect", "circle", "ellipse", "text", "image", "use"}
+
+def qt_image(image: Image.Image) -> QImage:
+    """Own a Qt copy so pixel storage outlives the temporary Pillow buffer."""
+    rgba = image.convert("RGBA")
+    return QImage(rgba.tobytes(), rgba.width, rgba.height, rgba.width * 4, QImage.Format.Format_RGBA8888).copy()
 
 
-def svg_graphics(root: ElementTree.Element) -> list[tuple[str, str, ElementTree.Element]]:
-    """Identify visible-tree graphics, excluding reusable definitions and text children."""
-    result = []
+class ImageCanvas(QWidget):
+    def __init__(self, app):
+        super().__init__(app)
+        self.app = app
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMinimumSize(1, 1)
 
-    def visit(element: ElementTree.Element, path: str, identity: str = "") -> None:
-        tag = element.tag.rsplit("}", 1)[-1]
-        if tag in {"defs", "clipPath", "mask", "marker", "pattern", "symbol"}:
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("black"))
+        app = self.app
+        if app.image_bounds is None:
             return
-        identity = element.get("id") or element.get("data-c") or identity
-        if tag in SVG_GRAPHICS:
-            identifier = element.get("id")
-            key = f"id:{identifier}" if identifier else f"path:{path}"
-            label = f"{identity or path} — {tag}"
-            result.append((key, label, element))
-            return
-        for index, child in enumerate(element):
-            visit(child, f"{path}/{index}", identity)
+        left, top, width, height = app.image_bounds
+        if app.photo is not None:
+            painter.drawImage(QPointF(*app.photo_position), app.photo)
+        if app.overlay_photo is not None:
+            painter.drawImage(QPointF(*app.photo_position), app.overlay_photo)
+        painter.setPen(QPen(QColor("yellow"), 2))
+        if app.anchor_preview is not None:
+            self._cross(painter, left + app.anchor_preview.x * width, top + app.anchor_preview.y * height)
+        for x0, y0, x1, y1 in app.element_previews:
+            painter.drawRect(
+                QRectF(left + x0 * width - 3, top + y0 * height - 3, (x1 - x0) * width + 6, (y1 - y0) * height + 6)
+            )
+            self._cross(painter, left + (x0 + x1) * width / 2, top + (y0 + y1) * height / 2)
+        if app.images and app.images[app.current_index] in app.classified_map:
+            painter.setPen(QPen(QColor("#32cd32"), 3))
+            painter.drawRect(QRectF(left, top, width, height))
 
-    visit(root, "0")
-    return result
+    @staticmethod
+    def _cross(painter, x, y):
+        painter.drawEllipse(QPointF(x, y), 8, 8)
+        painter.drawLine(QPointF(x - 14, y), QPointF(x + 14, y))
+        painter.drawLine(QPointF(x, y - 14), QPointF(x, y + 14))
 
+    def resizeEvent(self, event):
+        self.app.update_canvas()
+        super().resizeEvent(event)
 
-def _display_value(value: object, limit: int = 300) -> str:
-    """Convert image metadata to a compact, safe display string."""
-    if isinstance(value, bytes):
-        return f"{len(value):,} bytes"
-    if isinstance(value, tuple):
-        text = " × ".join(str(item) for item in value)
-    else:
-        text = str(value)
-    text = " ".join(text.split())
-    return text if len(text) <= limit else f"{text[: limit - 1]}…"
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y() or event.pixelDelta().y()
+        if delta:
+            self.app.zoom_image(SimpleNamespace(x=event.position().x(), y=event.position().y(), delta=delta))
+        event.accept()
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setFocus()
+            self.app.start_pan(SimpleNamespace(x=event.position().x(), y=event.position().y()))
+            event.accept()
+        else:
+            super().mousePressEvent(event)
 
-def image_metadata(image_path: Path, overlay_path: Path | None = None) -> list[tuple[str, list[tuple[str, str]]]]:
-    """Collect grouped file, raster, embedded, and EXIF metadata."""
-    stat = image_path.stat()
-    file_details = [
-        ("Name", image_path.name),
-        ("Folder", os.fspath(image_path.parent)),
-        ("File size", f"{stat.st_size:,} bytes"),
-        ("Modified", datetime.fromtimestamp(stat.st_mtime).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")),
-        ("SVG overlay", overlay_path.name if overlay_path is not None else "None"),
-    ]
+    def mouseMoveEvent(self, event):
+        position = SimpleNamespace(x=event.position().x(), y=event.position().y())
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self.app.pan_image(position)
+        else:
+            self.app.inspect_pixel(position)
 
-    with Image.open(image_path) as source:
-        image_details = [
-            ("Format", source.format or image_path.suffix.removeprefix(".").upper()),
-            ("Dimensions", f"{source.width:,} × {source.height:,} pixels"),
-            ("Megapixels", f"{source.width * source.height / 1_000_000:.2f}"),
-            ("Color mode", source.mode),
-            ("Bands", ", ".join(source.getbands())),
-            ("Frames", str(getattr(source, "n_frames", 1))),
-            ("Animated", "Yes" if getattr(source, "is_animated", False) else "No"),
-        ]
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self.app.fit_image_to_window()
+            event.accept()
+        else:
+            super().mouseDoubleClickEvent(event)
 
-        embedded_details: list[tuple[str, str]] = []
-        for key, value in sorted(source.info.items()):
-            label = key.replace("_", " ").title()
-            embedded_details.append((label, _display_value(value)))
-
-        exif_details: list[tuple[str, str]] = []
-        try:
-            for tag_id, value in source.getexif().items():
-                tag = ExifTags.TAGS.get(tag_id, f"Tag {tag_id}")
-                exif_details.append((str(tag), _display_value(value)))
-        except (AttributeError, OSError, ValueError):
-            pass
-        exif_details.sort(key=lambda item: item[0].casefold())
-
-    sections = [("File", file_details), ("Image", image_details)]
-    if embedded_details:
-        sections.append(("Embedded metadata", embedded_details))
-    if exif_details:
-        sections.append(("EXIF", exif_details))
-    return sections
+    def leaveEvent(self, event):
+        self.app.clear_pixel()
+        super().leaveEvent(event)
 
 
-def fitted_size(image_size: tuple[int, int], viewport_size: tuple[int, int]) -> tuple[int, int]:
-    """Return the largest aspect-ratio-preserving size contained by a viewport."""
-    image_width, image_height = image_size
-    viewport_width, viewport_height = viewport_size
-    if viewport_width * image_height <= viewport_height * image_width:
-        return viewport_width, max(1, image_height * viewport_width // image_width)
-    return max(1, image_width * viewport_height // image_height), viewport_height
+class ImageClassifierApp(QMainWindow):
+    """Qt desktop viewer for interactively sorting images into class folders."""
 
-
-def matching_svg_path(image_path: Path) -> Path | None:
-    """Find a same-directory SVG whose stem matches the image stem."""
-    expected_name = f"{image_path.stem}.svg".casefold()
-    try:
-        return next(
-            (
-                candidate
-                for candidate in image_path.parent.iterdir()
-                if candidate.is_file() and candidate.name.casefold() == expected_name
-            ),
-            None,
-        )
-    except OSError:
-        return None
-
-
-def transfer_classified_files(
-    folder_path: Path,
-    classified_items: Iterable[tuple[str, str]],
-    *,
-    copying: bool,
-    progress_callback: Callable[[int], None] | None = None,
-) -> tuple[int, list[str]]:
-    """Transfer classified files without depending on the Tk event thread."""
-    completed_count = 0
-    failures: list[str] = []
-    transfer = shutil.copy2 if copying else shutil.move
-    for progress, (filename, classification) in enumerate(classified_items, start=1):
-        source = folder_path / filename
-        destination_dir = folder_path / classification
-        destination = destination_dir / filename
-        overlay_source = matching_svg_path(source)
-        overlay_destination = destination_dir / overlay_source.name if overlay_source is not None else None
-
-        try:
-            destination_dir.mkdir(parents=True, exist_ok=True)
-            if destination.exists():
-                failures.append(f"{filename}: destination already exists")
-                continue
-            if overlay_destination is not None and overlay_destination.exists():
-                failures.append(f"{filename}: SVG overlay destination already exists")
-                continue
-            transfer(os.fspath(source), os.fspath(destination))
-            if overlay_source is not None and overlay_destination is not None:
-                transfer(os.fspath(overlay_source), os.fspath(overlay_destination))
-            completed_count += 1
-        except OSError as exc:
-            failures.append(f"{filename}: {exc}")
-        finally:
-            if progress_callback is not None:
-                progress_callback(progress)
-
-    return completed_count, failures
-
-
-def _svg_viewport_size(root: ElementTree.Element) -> tuple[float, float] | None:
-    """Return the SVG coordinate viewport when it can be determined."""
-    view_box = root.get("viewBox")
-    if view_box:
-        try:
-            _, _, width, height = (float(value) for value in view_box.replace(",", " ").split())
-            if width > 0 and height > 0:
-                return width, height
-        except (TypeError, ValueError):
-            pass
-    try:
-        width = float(root.get("width", "").removesuffix("px"))
-        height = float(root.get("height", "").removesuffix("px"))
-        return (width, height) if width > 0 and height > 0 else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _style_declarations(style_text: str) -> dict[str, str]:
-    return {
-        name.strip(): value.strip()
-        for declaration in style_text.split(";")
-        if ":" in declaration
-        for name, value in (declaration.split(":", 1),)
-    }
-
-
-def _normalized_font_size(value: str) -> str:
-    """Convert point font sizes to pixels for resvg's text layout."""
-    if value.casefold().endswith("pt"):
-        try:
-            return f"{float(value[:-2]) * 96 / 72:g}px"
-        except ValueError:
-            pass
-    return value
-
-
-def _materialize_svg_font_styles(root: ElementTree.Element) -> None:
-    """Put inherited CSS font properties directly on text for renderer compatibility."""
-    class_styles: dict[str, dict[str, str]] = {}
-    for element in root.iter():
-        if isinstance(element.tag, str) and element.tag.rsplit("}", 1)[-1] == "style" and element.text:
-            for selector, declarations in re.findall(r"([^{}]+)\{([^{}]*)\}", element.text):
-                for class_name in re.findall(r"\.([\w-]+)", selector):
-                    class_styles.setdefault(class_name, {}).update(_style_declarations(declarations))
-
-    def visit(element: ElementTree.Element, inherited: dict[str, str]) -> None:
-        effective = inherited.copy()
-        for class_name in element.get("class", "").split():
-            effective.update(class_styles.get(class_name, {}))
-        effective.update(_style_declarations(element.get("style", "")))
-        for property_name in INHERITED_FONT_PROPERTIES:
-            if property_name in element.attrib:
-                effective[property_name] = element.attrib[property_name]
-
-        tag_name = element.tag.rsplit("}", 1)[-1] if isinstance(element.tag, str) else ""
-        if tag_name in {"text", "tspan"}:
-            for property_name in INHERITED_FONT_PROPERTIES:
-                if property_name in effective and (property_name == "font-size" or property_name not in element.attrib):
-                    value = effective[property_name]
-                    element.set(property_name, _normalized_font_size(value) if property_name == "font-size" else value)
-        for child in element:
-            visit(child, effective)
-
-    visit(root, {})
-
-
-def svg_with_line_width(
-    svg_path: Path,
-    line_width: float,
-    render_size: tuple[int, int] | None = None,
-    text_size: float | None = None,
-    hidden_elements: set[str] | None = None,
-) -> bytes:
-    """Return SVG data with uniform screen-pixel stroke and text sizes."""
-    root = ElementTree.parse(svg_path).getroot()
-    for key, _, element in svg_graphics(root):
-        if hidden_elements and key in hidden_elements:
-            element.set("display", "none")
-            element.set("style", element.get("style", "") + ";display:none !important")
-    _materialize_svg_font_styles(root)
-    source_line_width = line_width
-    source_text_size = text_size
-    viewport_size = _svg_viewport_size(root)
-    if render_size is not None and viewport_size is not None:
-        scale = min(render_size[0] / viewport_size[0], render_size[1] / viewport_size[1])
-        if scale > 0:
-            source_line_width = line_width / scale
-            if text_size is not None:
-                source_text_size = text_size / scale
-    namespace = root.tag.partition("}")[0].removeprefix("{") if "}" in root.tag else ""
-    style_tag = f"{{{namespace}}}style" if namespace else "style"
-    style = ElementTree.Element(style_tag, {"type": "text/css"})
-    style.text = (
-        f"path, line, polyline, polygon, rect, circle, ellipse {{ stroke-width: {source_line_width:g} !important; }}"
-    )
-    root.insert(0, style)
-    marker_tag = f"{{{namespace}}}marker" if namespace else "marker"
-    for marker in root.iter(marker_tag):
-        marker.set("markerUnits", "strokeWidth")
-    if source_text_size is not None:
-        for element in root.iter():
-            tag_name = element.tag.rsplit("}", 1)[-1] if isinstance(element.tag, str) else ""
-            if tag_name in {"text", "tspan"}:
-                element.set("font-size", f"{source_text_size:g}px")
-    return ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)
-
-
-def visible_svg_graphics(
-    svg_path: Path, size: tuple[int, int], line_width: float = 1, text_size: float = 16
-) -> list[tuple[str, str, tuple[float, float, float, float]]]:
-    """Find rendered bounds within the viewport, including transforms, clipping and markers.
-
-    Inspect source visibility, not the user's hidden-element choices, so hidden rows
-    remain available to show again. Bounds are fractions of the rendered viewport.
-    """
-    import resvg_py
-
-    # Preserve document-position keys before svg_with_line_width inserts its style.
-    originals = svg_graphics(ElementTree.parse(svg_path).getroot())
-    root = ElementTree.fromstring(svg_with_line_width(svg_path, line_width, size, text_size))
-    graphics = svg_graphics(root)
-    parents = {child: (parent, index) for parent in root.iter() for index, child in enumerate(parent)}
-    namespace = root.tag.partition("}")[0] + "}" if "}" in root.tag else ""
-    wrappers = []
-    # Keep other graphics available as references (e.g. <use href="#shape">),
-    # while preventing them from painting directly during each isolated render.
-    for _, _, element in graphics:
-        parent, index = parents[element]
-        wrapper = ElementTree.Element(f"{namespace}defs")
-        wrapper.append(element)
-        parent[index] = wrapper
-        wrappers.append(wrapper)
-    result = []
-    for (key, label, _), (_, _, element), wrapper in zip(originals, graphics, wrappers):
-        parent, index = parents[element]
-        parent[index] = element
-        png = resvg_py.svg_to_bytes(
-            svg_string=ElementTree.tostring(root, encoding="unicode"),
-            width=size[0],
-            height=size[1],
-            resources_dir=os.fspath(svg_path.parent),
-        )
-        with Image.open(BytesIO(png)) as rendered:
-            bounds = rendered.convert("RGBA").getchannel("A").getbbox()
-            if bounds is not None:
-                left, top, right, bottom = bounds
-                result.append((key, label, (left / size[0], top / size[1], right / size[0], bottom / size[1])))
-        parent[index] = wrapper
-    return result
-
-
-class ImageClassifierApp:
-    """Tkinter GUI for interactively sorting images into class folders."""
-
-    def __init__(self, root: tk.Tk) -> None:
-        self.root = root
-        self.root.title("ClassifyImage")
-        self.root.geometry("1100x750")
-        self.root.minsize(700, 500)
-
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("ClassifyImage")
+        self.setWindowIcon(application_icon())
+        self.resize(1100, 750)
+        self.setMinimumSize(700, 500)
         self.folder_path: Path | None = None
-        self.images: list[str] = []
+        self.images = []
         self.current_index = 0
-        self.classifications: list[str] = []
-        self.classified_map: dict[str, str] = {}
-        self.overlay_paths: dict[str, Path] = {}
-
+        self.classifications = []
+        self.classified_map = {}
+        self.overlay_paths = {}
         self.zoom_factor = 1.0
+        self.offset_x = self.offset_y = 0.0
+        self.start_x = self.start_y = 0.0
         self.anchor_key = None
         self.anchors = []
         self.anchor_preview = None
         self.element_previews = []
-        self.anchor_window = None
-        self.anchor_status = tk.StringVar(value="Anchor off")
-        self.offset_x = 0
-        self.offset_y = 0
-        self.start_x = 0
-        self.start_y = 0
-
-        self.image: Image.Image | None = None
-        self.rendered_image_cache: tuple[tuple[int, ...], ImageTk.PhotoImage] | None = None
-        self.overlay_path: Path | None = None
-        self.overlay_cache: OrderedDict[tuple[int, ...], ImageTk.PhotoImage] = OrderedDict()
-        self.photo: ImageTk.PhotoImage | None = None
-        self.overlay_enabled = tk.BooleanVar(value=True)
-        self.hidden_svg_elements: set[str] = set()
-        self.pixel_status = tk.StringVar(value="Hover over the image to inspect pixels")
+        self.image = None
         self.image_bounds = None
         self.pixel_pointer = None
+        self.photo = self.overlay_photo = None
+        self.photo_position = (0, 0)
+        self.rendered_image_cache = None
+        self.overlay_path = None
+        self.overlay_cache = OrderedDict()
+        self.hidden_svg_elements = set()
         self.overlay_line_width = 1.0
-        self.overlay_line_width_var = tk.StringVar(value="1")
         self.overlay_text_size = 16.0
-        self.overlay_text_size_var = tk.StringVar(value="16")
-        self.transfer_mode = tk.StringVar(value="Move")
         self.details_visible = False
         self.is_playing = False
         self.play_delay_ms = 1000
-        self.play_after_id: str | None = None
         self.image_loader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="image-loader")
-        self.prefetched_images: dict[Path, Future[Image.Image]] = {}
+        self.prefetched_images: dict[Path, Future] = {}
         self.transfer_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="file-transfer")
-        self.transfer_future: Future[tuple[int, list[str]]] | None = None
-        self.transfer_updates: SimpleQueue[int] = SimpleQueue()
-        self.transfer_folder: Path | None = None
+        self.transfer_future = None
+        self.transfer_updates = SimpleQueue()
+        self.transfer_folder = None
         self.transfer_operation = ""
-
+        self.class_shortcuts = []
+        self.play_timer = QTimer(self)
+        self.play_timer.setSingleShot(True)
+        self.play_timer.timeout.connect(self.play_images)
+        self.transfer_timer = QTimer(self)
+        self.transfer_timer.setInterval(50)
+        self.transfer_timer.timeout.connect(self._poll_transfer)
         self._create_widgets()
 
-    def _create_widgets(self) -> None:
-        file_manage_frame = ttk.Frame(self.root)
-        file_manage_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+    @staticmethod
+    def _button(layout, text, callback):
+        button = QPushButton(text)
+        button.clicked.connect(callback)
+        layout.addWidget(button)
+        return button
 
-        file_action_frame = ttk.Frame(file_manage_frame)
-        file_action_frame.pack(anchor=tk.CENTER)
-        overlay_control_frame = ttk.Frame(file_manage_frame)
-        overlay_control_frame.pack(anchor=tk.CENTER, pady=(5, 0))
+    def _create_widgets(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        actions = QHBoxLayout()
+        layout.addLayout(actions)
+        self.select_folder_button = self._button(actions, "Select Folder", self.select_folder)
+        self._button(actions, "Define Classes", self.define_classes)
+        self.details_button = self._button(actions, "Show Details", self.toggle_image_details)
+        actions.addStretch()
+        actions.addWidget(QLabel("Classified files:"))
+        self.transfer_mode_selector = QComboBox()
+        self.transfer_mode_selector.addItems(["Move", "Copy"])
+        actions.addWidget(self.transfer_mode_selector)
+        self.transfer_button = self._button(actions, "Move Classified", self.move_classified_images)
+        self.transfer_mode_selector.currentTextChanged.connect(self._update_transfer_button)
+        overlays = QHBoxLayout()
+        layout.addLayout(overlays)
+        self.overlay_enabled = QCheckBox("Show SVG Overlay")
+        self.overlay_enabled.setChecked(True)
+        overlays.addWidget(self.overlay_enabled)
+        self.overlay_enabled.toggled.connect(self.toggle_svg_overlay)
+        overlays.addWidget(QLabel("Line width"))
+        self.overlay_line_width_spinbox = QDoubleSpinBox()
+        self.overlay_line_width_spinbox.setRange(0.1, 100)
+        self.overlay_line_width_spinbox.setSingleStep(0.5)
+        self.overlay_line_width_spinbox.setValue(1)
+        self.overlay_line_width_spinbox.valueChanged.connect(self.set_overlay_line_width)
+        overlays.addWidget(self.overlay_line_width_spinbox)
+        overlays.addWidget(QLabel("Text size"))
+        self.overlay_text_size_spinbox = QDoubleSpinBox()
+        self.overlay_text_size_spinbox.setRange(1, 200)
+        self.overlay_text_size_spinbox.setValue(16)
+        self.overlay_text_size_spinbox.valueChanged.connect(self.set_overlay_text_size)
+        overlays.addWidget(self.overlay_text_size_spinbox)
+        self._button(overlays, "Select Anchor", self.select_anchor)
+        self._button(overlays, "Unlock", self.unlock_anchor)
+        self.elements_button = self._button(overlays, "Elements…", self.select_svg_elements)
+        overlays.addStretch()
+        self.anchor_status = QLabel("Anchor off")
+        self.pixel_status = QLabel("Hover over the image to inspect pixels")
+        layout.addWidget(self.anchor_status)
+        layout.addWidget(self.pixel_status)
+        self.content_pane = QSplitter(Qt.Orientation.Horizontal)
+        self.canvas = ImageCanvas(self)
+        self.content_pane.addWidget(self.canvas)
+        self.details_frame = QWidget()
+        details = QVBoxLayout(self.details_frame)
+        header = QHBoxLayout()
+        header.addWidget(QLabel("Image Inspector"))
+        self._button(header, "Close", self.toggle_image_details)
+        details.addLayout(header)
+        self.details_tree = QTreeWidget()
+        self.details_tree.setHeaderLabels(["Property", "Value"])
+        self.details_tree.setColumnWidth(0, 160)
+        details.addWidget(self.details_tree)
+        self._button(details, "Copy Selected Value", self.copy_selected_detail)
+        self.content_pane.addWidget(self.details_frame)
+        self.content_pane.setStretchFactor(0, 4)
+        self.content_pane.setStretchFactor(1, 2)
+        self.details_frame.hide()
+        layout.addWidget(self.content_pane, 1)
+        self.directory_label = QLabel("No folder selected")
+        self.directory_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.directory_label)
+        self.classification_layout = QHBoxLayout()
+        layout.addLayout(self.classification_layout)
+        self.create_classification_buttons()
+        status = QHBoxLayout()
+        self.filename_label = QLabel()
+        self.status_label = QLabel()
+        status.addWidget(self.filename_label)
+        status.addWidget(self.status_label)
+        status.addStretch()
+        layout.addLayout(status)
+        self.transfer_progress = QProgressBar()
+        self.transfer_progress.hide()
+        layout.addWidget(self.transfer_progress)
+        controls = QHBoxLayout()
+        layout.addLayout(controls)
+        controls.addStretch()
+        controls.addWidget(QLabel("Delay (ms)"))
+        self.delay_entry = QSpinBox()
+        self.delay_entry.setRange(MIN_PLAY_DELAY_MS, 2147483647)
+        self.delay_entry.setValue(self.play_delay_ms)
+        controls.addWidget(self.delay_entry)
+        self.play_button = self._button(controls, "Play", self.toggle_play)
+        self._button(controls, "◀ Previous", self.show_previous_image)
+        self._button(controls, "Next ▶", self.show_next_image)
+        self.index_entry = QLineEdit("0")
+        self.index_entry.setFixedWidth(65)
+        self.index_entry.returnPressed.connect(self.jump_to_index)
+        controls.addWidget(self.index_entry)
+        self.total_label = QLabel("/ 0")
+        controls.addWidget(self.total_label)
+        controls.addStretch()
+        for key, action in (("Left", self.show_previous_image), ("Right", self.show_next_image)):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.activated.connect(lambda action=action: self._navigation_shortcut(action))
 
-        ttk.Button(file_action_frame, text="Select Folder", command=self.select_folder).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(file_action_frame, text="Define Classes", command=self.define_classes).pack(side=tk.LEFT, padx=5)
-        self.details_button = ttk.Button(file_action_frame, text="Show Details", command=self.toggle_image_details)
-        self.details_button.pack(side=tk.LEFT, padx=5)
-        ttk.Separator(file_action_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
-        ttk.Label(file_action_frame, text="Classified files:").pack(side=tk.LEFT, padx=(0, 5))
-        self.transfer_mode_selector = ttk.Combobox(
-            file_action_frame,
-            width=6,
-            state="readonly",
-            textvariable=self.transfer_mode,
-            values=("Move", "Copy"),
-        )
-        self.transfer_mode_selector.pack(side=tk.LEFT, padx=(0, 5))
-        self.transfer_mode_selector.bind("<<ComboboxSelected>>", self._update_transfer_button)
-        self.transfer_button = ttk.Button(
-            file_action_frame,
-            text="Move Classified",
-            command=self.move_classified_images,
-        )
-        self.transfer_button.pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Checkbutton(
-            overlay_control_frame,
-            text="Show SVG Overlay",
-            variable=self.overlay_enabled,
-            command=self.toggle_svg_overlay,
-        ).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Label(overlay_control_frame, text="Line width").pack(side=tk.LEFT, padx=(10, 5))
-        self.overlay_line_width_spinbox = ttk.Spinbox(
-            overlay_control_frame,
-            from_=0.1,
-            to=100.0,
-            increment=0.5,
-            width=5,
-            textvariable=self.overlay_line_width_var,
-            command=self.set_overlay_line_width,
-        )
-        self.overlay_line_width_spinbox.pack(side=tk.LEFT)
-        self.overlay_line_width_spinbox.bind("<Return>", self.set_overlay_line_width)
-        self.overlay_line_width_spinbox.bind("<FocusOut>", self.set_overlay_line_width)
-        ttk.Label(overlay_control_frame, text="Text size").pack(side=tk.LEFT, padx=(15, 5))
-        self.overlay_text_size_spinbox = ttk.Spinbox(
-            overlay_control_frame,
-            from_=1.0,
-            to=200.0,
-            increment=1.0,
-            width=5,
-            textvariable=self.overlay_text_size_var,
-            command=self.set_overlay_text_size,
-        )
-        self.overlay_text_size_spinbox.pack(side=tk.LEFT)
-        self.overlay_text_size_spinbox.bind("<Return>", self.set_overlay_text_size)
-        self.overlay_text_size_spinbox.bind("<FocusOut>", self.set_overlay_text_size)
-        ttk.Button(overlay_control_frame, text="Select Anchor", command=self.select_anchor).pack(side=tk.LEFT, padx=10)
-        ttk.Button(overlay_control_frame, text="Unlock", command=self.unlock_anchor).pack(side=tk.LEFT)
-        self.elements_button = ttk.Button(overlay_control_frame, text="Elements…", command=self.select_svg_elements)
-        self.elements_button.pack(side=tk.LEFT, padx=5)
-        ttk.Label(self.root, textvariable=self.anchor_status).pack()
-        ttk.Label(self.root, textvariable=self.pixel_status).pack()
+    @staticmethod
+    def _editing():
+        return isinstance(QApplication.focusWidget(), (QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox))
 
-        self.content_pane = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
-        self.content_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+    def _navigation_shortcut(self, action):
+        if not self._editing() and self.transfer_future is None:
+            action()
 
-        canvas_frame = ttk.Frame(self.content_pane)
-        self.content_pane.add(canvas_frame, weight=4)
-        self.canvas = tk.Canvas(canvas_frame, bg="black", highlightthickness=0)
-        self.canvas.pack(fill=tk.BOTH, expand=True)
-        self.canvas.bind("<MouseWheel>", self.zoom_image)
-        self.canvas.bind("<Button-4>", self.zoom_image)
-        self.canvas.bind("<Button-5>", self.zoom_image)
-        self.canvas.bind("<Double-Button-2>", self.fit_image_to_window)
-        self.canvas.bind("<ButtonPress-1>", self.start_pan)
-        self.canvas.bind("<B1-Motion>", self.pan_image)
-        self.canvas.bind("<Motion>", self.inspect_pixel)
-        self.canvas.bind("<Leave>", self.clear_pixel)
-        self.canvas.bind("<Configure>", lambda _event: self.update_canvas())
+    def select_folder(self):
+        selected = QFileDialog.getExistingDirectory(self, "Select image folder")
+        if selected:
+            self.open_folder(Path(selected))
 
-        self.details_frame = ttk.Frame(self.content_pane, padding=(8, 0, 0, 0))
-        details_header = ttk.Frame(self.details_frame)
-        details_header.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(details_header, text="Image Inspector", font=("Segoe UI", 11, "bold")).pack(side=tk.LEFT)
-        ttk.Button(details_header, text="Close", command=self.toggle_image_details).pack(side=tk.RIGHT)
-
-        details_tree_frame = ttk.Frame(self.details_frame)
-        details_tree_frame.pack(fill=tk.BOTH, expand=True)
-        self.details_tree = ttk.Treeview(
-            details_tree_frame, columns=("value",), show="tree headings", selectmode="browse"
-        )
-        self.details_tree.heading("#0", text="Property", anchor=tk.W)
-        self.details_tree.heading("value", text="Value", anchor=tk.W)
-        self.details_tree.column("#0", width=135, minwidth=90, stretch=False)
-        self.details_tree.column("value", width=240, minwidth=140, stretch=True)
-        details_scrollbar = ttk.Scrollbar(details_tree_frame, orient=tk.VERTICAL, command=self.details_tree.yview)
-        self.details_tree.configure(yscrollcommand=details_scrollbar.set)
-        self.details_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        details_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        ttk.Button(self.details_frame, text="Copy Selected Value", command=self.copy_selected_detail).pack(
-            fill=tk.X, pady=(6, 0)
-        )
-
-        self.directory_label = ttk.Label(self.root, text="No folder selected", anchor=tk.W)
-        self.directory_label.pack(fill=tk.X, padx=10, pady=(0, 5))
-
-        self.classification_frame = ttk.Frame(self.root)
-        self.classification_frame.pack(padx=10, pady=5)
-
-        self.btn_remove_classification = ttk.Button(
-            self.classification_frame,
-            text="Remove Classification",
-            command=self.remove_classification,
-        )
-
-        file_and_class_frame = ttk.Frame(self.root)
-        file_and_class_frame.pack(padx=10, pady=5)
-
-        self.filename_label = ttk.Label(file_and_class_frame, text="", font=("Segoe UI", 11))
-        self.filename_label.pack(side=tk.LEFT, padx=(0, 10))
-
-        self.status_label = ttk.Label(file_and_class_frame, text="", font=("Segoe UI", 11))
-        self.status_label.pack(side=tk.LEFT)
-
-        self.transfer_progress = ttk.Progressbar(self.root, mode="determinate")
-
-        controls_frame = ttk.Frame(self.root)
-        controls_frame.pack(padx=10, pady=(5, 10))
-
-        ttk.Label(controls_frame, text="Delay (ms)").pack(side=tk.LEFT)
-        self.delay_entry = ttk.Entry(controls_frame, width=7)
-        self.delay_entry.insert(0, str(self.play_delay_ms))
-        self.delay_entry.pack(side=tk.LEFT, padx=5)
-
-        self.play_button = ttk.Button(controls_frame, text="Play", command=self.toggle_play)
-        self.play_button.pack(side=tk.LEFT, padx=(0, 15))
-
-        ttk.Button(controls_frame, text="◀ Previous", command=self.show_previous_image).pack(side=tk.LEFT, padx=5)
-        ttk.Button(controls_frame, text="Next ▶", command=self.show_next_image).pack(side=tk.LEFT, padx=5)
-
-        self.index_var = tk.StringVar(value="0")
-        self.index_entry = ttk.Entry(controls_frame, width=5, textvariable=self.index_var)
-        self.index_entry.pack(side=tk.LEFT, padx=(20, 5))
-        self.index_entry.bind("<Return>", self.jump_to_index)
-
-        self.total_label = ttk.Label(controls_frame, text="/ 0")
-        self.total_label.pack(side=tk.LEFT)
-
-        self.root.bind("<Left>", lambda _event: self.show_previous_image())
-        self.root.bind("<Right>", lambda _event: self.show_next_image())
-        self.root.protocol("WM_DELETE_WINDOW", self.close)
-
-    def select_folder(self) -> None:
-        folder_selected = filedialog.askdirectory()
-        if not folder_selected:
-            return
-
+    def open_folder(self, folder: Path):
         self.stop_playback()
         self._clear_prefetch()
-        self.folder_path = Path(folder_selected)
+        self.folder_path = folder
         self.hidden_svg_elements.clear()
-        self.directory_label.config(text=f"{self.folder_path}")
+        self.directory_label.setText(str(folder))
         self.load_images()
         self.anchor_key = None
         self.reset_view()
         self.show_image()
 
-    def load_images(self) -> None:
+    def load_images(self):
         if self.folder_path is None:
             self.images = []
             return
-
         paths = [path for path in self.folder_path.iterdir() if path.is_file()]
         self.images = sorted(path.name for path in paths if path.suffix.lower() in SUPPORTED_EXTENSIONS)
         self.overlay_paths = {path.stem.casefold(): path for path in paths if path.suffix.casefold() == ".svg"}
@@ -563,94 +326,64 @@ class ImageClassifierApp:
         self.classified_map.clear()
 
     @staticmethod
-    def _open_image(image_path: Path) -> Image.Image:
-        with Image.open(image_path) as source_image:
-            return source_image.copy()
+    def _open_image(path):
+        with Image.open(path) as source:
+            return source.copy()
 
-    def _clear_prefetch(self, *, wait: bool = False) -> None:
-        futures = list(self.prefetched_images.values())
-        for future in futures:
+    def _clear_prefetch(self):
+        for future in self.prefetched_images.values():
             future.cancel()
-        if wait:
-            wait_for_futures(futures)
         self.prefetched_images.clear()
 
-    def _prefetch_next_image(self) -> None:
-        if self.folder_path is None or self.current_index >= len(self.images) - 1:
-            return
-        next_path = self.folder_path / self.images[self.current_index + 1]
-        if next_path not in self.prefetched_images:
-            self.prefetched_images[next_path] = self.image_loader.submit(self._open_image, next_path)
+    def _prefetch_next_image(self):
+        wanted = None
+        if self.folder_path is not None and self.current_index < len(self.images) - 1:
+            wanted = self.folder_path / self.images[self.current_index + 1]
+        for path in list(self.prefetched_images):
+            if path != wanted:
+                self.prefetched_images.pop(path).cancel()
+        if wanted is not None and wanted not in self.prefetched_images:
+            self.prefetched_images[wanted] = self.image_loader.submit(self._open_image, wanted)
 
-    def show_image(self) -> None:
+    def show_image(self):
         if not self.images or self.folder_path is None:
             self._clear_image_display()
             return
-
-        image_path = self.folder_path / self.images[self.current_index]
+        path = self.folder_path / self.images[self.current_index]
         try:
-            future = self.prefetched_images.pop(image_path, None)
-            self.image = future.result() if future is not None else self._open_image(image_path)
+            future = self.prefetched_images.pop(path, None)
+            self.image = future.result() if future else self._open_image(path)
         except (OSError, ValueError) as exc:
-            messagebox.showerror("Image Error", f"Failed to open image:\n{image_path}\n\n{exc}")
+            self.stop_playback()
+            QMessageBox.critical(self, "Image Error", f"Failed to open image:\n{path}\n\n{exc}")
             return
-
         self.rendered_image_cache = None
-        self._load_overlay(image_path)
-        self._update_image_details(image_path)
+        self._load_overlay(path)
+        self._update_image_details(path)
         self.update_canvas()
-        self.filename_label.config(text=image_path.name)
-
-        current_file = self.images[self.current_index]
-        if current_file in self.classified_map:
-            classification = self.classified_map[current_file]
-            self.status_label.config(
-                text=f"Classified as: {classification}",
-                foreground="green",
-                font=("Segoe UI", 11, "bold"),
-            )
-        else:
-            self.status_label.config(
-                text="Unclassified",
-                foreground="red",
-                font=("Segoe UI", 11, "bold"),
-            )
-
-        self.index_var.set(str(self.current_index + 1))
-        self.total_label.config(text=f"/ {len(self.images)}")
-        self._clear_unneeded_prefetch()
+        self.filename_label.setText(path.name)
+        classification = self.classified_map.get(path.name)
+        self.status_label.setText(f"Classified as: {classification}" if classification else "Unclassified")
+        self.status_label.setStyleSheet("color: #32cd32; font-weight: bold" if classification else "color: #ee5555")
+        self.index_entry.setText(str(self.current_index + 1))
+        self.total_label.setText(f"/ {len(self.images)}")
         self._prefetch_next_image()
 
-    def _clear_unneeded_prefetch(self) -> None:
-        if self.folder_path is None:
-            self._clear_prefetch()
-            return
-        wanted = (
-            self.folder_path / self.images[self.current_index + 1]
-            if self.current_index < len(self.images) - 1
-            else None
-        )
-        for path, future in list(self.prefetched_images.items()):
-            if path != wanted:
-                future.cancel()
-                del self.prefetched_images[path]
-
-    def _clear_image_display(self) -> None:
-        self.image = None
-        self.image_bounds = None
-        self.clear_pixel()
+    def _clear_image_display(self):
+        self.image = self.image_bounds = self.photo = self.overlay_photo = None
         self.rendered_image_cache = None
         self.overlay_path = None
         self.overlay_cache.clear()
-        self.photo = None
-        self.canvas.delete("all")
-        self.filename_label.config(text="")
-        self.status_label.config(text="")
-        self.index_var.set("0")
-        self.total_label.config(text="/ 0")
-        self._clear_image_details()
+        self.anchors = []
+        self.clear_pixel()
+        self.canvas.update()
+        self.filename_label.clear()
+        self.status_label.clear()
+        self.index_entry.setText("0")
+        self.total_label.setText("/ 0")
+        self.details_tree.clear()
 
-    def _load_overlay(self, image_path: Path) -> None:
+    def _load_overlay(self, image_path):
         self.overlay_path = self.overlay_paths.get(image_path.stem.casefold())
         self.overlay_cache.clear()
         self.anchors = []
@@ -660,674 +393,535 @@ class ImageClassifierApp:
             except (OSError, ValueError, ElementTree.ParseError):
                 pass
 
-    def unlock_anchor(self) -> None:
-        self.anchor_key = None
-        self.anchor_preview = None
-        self.anchor_status.set("Anchor off")
-        self.reset_view()
-        self.update_canvas()
+    def _view_bounds(self):
+        canvas_width, canvas_height = max(1, self.canvas.width()), max(1, self.canvas.height())
+        fit_width, fit_height = fitted_size(self.image.size, (canvas_width, canvas_height))
+        width = max(1, int(fit_width * self.zoom_factor))
+        height = max(1, int(fit_height * self.zoom_factor))
+        center_x = self.offset_x + canvas_width // 2
+        center_y = self.offset_y + canvas_height // 2
+        anchor = next((a for a in self.anchors if a.key == self.anchor_key), None)
+        if anchor is not None:
+            center_x += (0.5 - anchor.x) * width
+            center_y += (0.5 - anchor.y) * height
+        return round(center_x) - width // 2, round(center_y) - height // 2, width, height
 
-    def _center_dialog(self, window: tk.Toplevel, width: int, height: int) -> None:
-        """Place a new dialog at the center of the main window."""
-        window.withdraw()
-        self.root.update_idletasks()
-        x = self.root.winfo_rootx() + (self.root.winfo_width() - width) // 2
-        y = self.root.winfo_rooty() + (self.root.winfo_height() - height) // 2
-        window.geometry(f"{width}x{height}+{x}+{y}")
-        window.deiconify()
-
-    def select_anchor(self) -> None:
-        self.stop_playback()
-        if self.anchor_window is not None:
-            self.anchor_window.lift()
+    def update_canvas(self):
+        if self.image is None:
+            self.canvas.update()
             return
-        window = tk.Toplevel(self.root)
-        self.anchor_window = window
-        window.title("Select SVG Anchor")
-        window.transient(self.root)
-        self._center_dialog(window, 530, 320)
-        window.grab_set()
-        window.columnconfigure(0, weight=1)
-        window.rowconfigure(1, weight=1)
-        ttk.Label(window, text="Select a point or endpoint to highlight it in the image.").grid(
-            row=0, column=0, padx=10, pady=10
-        )
-        tree = ttk.Treeview(window, columns=("x", "y"), selectmode="browse")
-        tree.heading("#0", text="Element / anchor")
-        tree.heading("x", text="Image X (%)")
-        tree.heading("y", text="Image Y (%)")
-        tree.column("#0", width=280)
-        tree.column("x", width=90)
-        tree.column("y", width=90)
-        tree.grid(row=1, column=0, sticky="nsew", padx=10)
-        for i, anchor in enumerate(self.anchors):
-            tree.insert(
-                "", "end", iid=str(i), text=anchor.label, values=(f"{anchor.x * 100:.3f}", f"{anchor.y * 100:.3f}")
-            )
-        if not self.anchors:
-            ttk.Label(window, text="No supported, identified anchors inside this SVG viewBox.").grid(row=2, column=0)
-
-        def preview(_event=None):
-            selected = tree.selection()
-            self.anchor_preview = self.anchors[int(selected[0])] if selected else None
-            self.update_canvas()
-
-        def close():
-            self.anchor_preview = None
-            self.anchor_window = None
-            window.destroy()
-            self.update_canvas()
-
-        def apply():
-            if self.anchor_preview is not None:
-                self.lock_anchor(self.anchor_preview)
-                close()
-
-        tree.bind("<<TreeviewSelect>>", preview)
-        buttons = ttk.Frame(window)
-        buttons.grid(row=3, column=0, pady=10)
-        ttk.Button(buttons, text="Lock anchor", command=apply).pack(side=tk.LEFT, padx=5)
-        ttk.Button(buttons, text="Cancel", command=close).pack(side=tk.LEFT, padx=5)
-        window.protocol("WM_DELETE_WINDOW", close)
-
-    def lock_anchor(self, anchor) -> None:
-        if self.image_bounds is not None:
-            left, top, width, height = self.image_bounds
-            self.offset_x = left + anchor.x * width - self.canvas.winfo_width() // 2
-            self.offset_y = top + anchor.y * height - self.canvas.winfo_height() // 2
+        self.image_bounds = self._view_bounds()
+        left, top, width, height = self.image_bounds
+        anchor = next((a for a in self.anchors if a.key == self.anchor_key), None)
+        if anchor is not None:
+            self.anchor_status.setText(f"Locked: {anchor.label} — drag to reposition")
+        elif self.anchor_key is not None:
+            self.anchor_status.setText("Anchor missing — playback stopped; showing centered image")
+            self.stop_playback()
         else:
-            self.offset_x = self.offset_y = 0
-        self.anchor_key = anchor.key
+            self.anchor_status.setText("Anchor off")
+        crop = (
+            max(0, -left),
+            max(0, -top),
+            min(width, self.canvas.width() - left),
+            min(height, self.canvas.height() - top),
+        )
+        x0, y0, x1, y1 = crop
+        self.photo = self.overlay_photo = None
+        if x1 > x0 and y1 > y0:
+            cache_key = (width, height, *crop)
+            if self.rendered_image_cache is None or self.rendered_image_cache[0] != cache_key:
+                source_box = (
+                    x0 * self.image.width / width,
+                    y0 * self.image.height / height,
+                    x1 * self.image.width / width,
+                    y1 * self.image.height / height,
+                )
+                resized = self.image.resize((x1 - x0, y1 - y0), Image.Resampling.NEAREST, box=source_box)
+                self.rendered_image_cache = (cache_key, qt_image(resized))
+            self.photo = self.rendered_image_cache[1]
+            self.photo_position = (left + x0, top + y0)
+            if self.overlay_enabled.isChecked():
+                self.overlay_photo = self._get_rendered_overlay((width, height), crop)
+        self.inspect_pixel()
+        self.canvas.update()
 
-    def select_svg_elements(self) -> None:
-        self.stop_playback()
-        if self.overlay_path is None:
-            messagebox.showinfo("SVG Elements", "The current image has no SVG overlay.")
-            return
-        try:
-            viewport = _svg_viewport_size(ElementTree.parse(self.overlay_path).getroot())
-            if viewport is None:
-                messagebox.showinfo("SVG Elements", "The SVG has no usable viewport.")
-                return
-            scale = 1024 / max(viewport)
-            size = (max(1, round(viewport[0] * scale)), max(1, round(viewport[1] * scale)))
-            elements = visible_svg_graphics(self.overlay_path, size, self.overlay_line_width, self.overlay_text_size)
-        except Exception as exc:  # noqa: BLE001 -- SVG renderer errors vary by backend.
-            messagebox.showerror("SVG Elements", str(exc))
-            return
-        window = tk.Toplevel(self.root)
-        window.title("SVG element visibility")
-        window.transient(self.root)
-        self._center_dialog(window, 650, 400)
-        window.grab_set()
-        ttk.Label(window, text="Select an element to highlight its location in the image.").pack(pady=8)
-        frame = ttk.Frame(window)
-        frame.pack(fill=tk.BOTH, expand=True, padx=10)
-        tree = ttk.Treeview(frame, columns=("x", "y", "visible"), selectmode="extended")
-        tree.heading("#0", text="Graphic element")
-        tree.column("#0", width=280)
-        for column, label in (("x", "Image X (%)"), ("y", "Image Y (%)")):
-            tree.heading(column, text=label)
-            tree.column(column, width=90, stretch=False)
-        tree.heading("visible", text="Visible")
-        tree.column("visible", width=65, stretch=False)
-        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        tree.pack(fill=tk.BOTH, expand=True)
-        for index, (key, label, bounds) in enumerate(elements):
-            left, top, right, bottom = bounds
-            tree.insert(
-                "",
-                "end",
-                iid=str(index),
-                text=label,
-                values=(
-                    f"{(left + right) * 50:.3f}",
-                    f"{(top + bottom) * 50:.3f}",
-                    "No" if key in self.hidden_svg_elements else "Yes",
-                ),
-            )
-        if not elements:
-            ttk.Label(window, text="No rendered graphics inside this SVG viewBox.").pack(pady=5)
-
-        def preview(_event=None):
-            self.element_previews = [elements[int(item)][2] for item in tree.selection()]
-            self.update_canvas()
-
-        def close():
-            self.element_previews = []
-            window.destroy()
-            self.update_canvas()
-
-        tree.bind("<<TreeviewSelect>>", preview)
-        window.protocol("WM_DELETE_WINDOW", close)
-
-        def change(visible: bool, *, all_elements: bool = False) -> None:
-            for item in tree.get_children() if all_elements else tree.selection():
-                key = elements[int(item)][0]
-                if visible:
-                    self.hidden_svg_elements.discard(key)
-                else:
-                    self.hidden_svg_elements.add(key)
-                tree.set(item, "visible", "Yes" if visible else "No")
-            self.overlay_cache.clear()
-            self.update_canvas()
-
-        buttons = ttk.Frame(window)
-        buttons.pack(pady=8)
-        ttk.Button(buttons, text="Show selected", command=lambda: change(True)).pack(side=tk.LEFT, padx=4)
-        ttk.Button(buttons, text="Hide selected", command=lambda: change(False)).pack(side=tk.LEFT, padx=4)
-        ttk.Button(buttons, text="Show all", command=lambda: change(True, all_elements=True)).pack(side=tk.LEFT, padx=4)
-        ttk.Button(buttons, text="Close", command=close).pack(side=tk.LEFT, padx=4)
-
-    def _get_rendered_overlay(
-        self, size: tuple[int, int], crop: tuple[int, int, int, int]
-    ) -> ImageTk.PhotoImage | None:
+    def _get_rendered_overlay(self, size, crop):
         if self.overlay_path is None:
             return None
-        cache_key = (*size, *crop)
-        if cache_key in self.overlay_cache:
-            self.overlay_cache.move_to_end(cache_key)
-            return self.overlay_cache[cache_key]
-
-        assert self.image is not None
+        key = (*size, *crop)
+        if key in self.overlay_cache:
+            self.overlay_cache.move_to_end(key)
+            return self.overlay_cache[key]
         try:
             import resvg_py
 
-            svg_root = ElementTree.fromstring(svg_with_line_width(
-                    self.overlay_path,
-                    self.overlay_line_width,
-                    size,
-                    self.overlay_text_size,
-                    self.hidden_svg_elements,
-                ))
+            root = ElementTree.fromstring(
+                svg_with_line_width(
+                    self.overlay_path, self.overlay_line_width, size, self.overlay_text_size, self.hidden_svg_elements
+                )
+            )
             left, top, right, bottom = crop
-            svg_root.set("width", str(size[0]))
-            svg_root.set("height", str(size[1]))
-            svg_root.set("x", str(-left))
-            svg_root.set("y", str(-top))
-            viewport = ElementTree.Element("{http://www.w3.org/2000/svg}svg", {
-                "width": str(right - left), "height": str(bottom - top),
-            })
-            viewport.append(svg_root)
-            svg_png = resvg_py.svg_to_bytes(
+            root.attrib.update(width=str(size[0]), height=str(size[1]), x=str(-left), y=str(-top))
+            viewport = ElementTree.Element(
+                "{http://www.w3.org/2000/svg}svg", {"width": str(right - left), "height": str(bottom - top)}
+            )
+            viewport.append(root)
+            png = resvg_py.svg_to_bytes(
                 svg_string=ElementTree.tostring(viewport, encoding="unicode"),
                 width=right - left,
                 height=bottom - top,
                 resources_dir=os.fspath(self.overlay_path.parent),
             )
-            with Image.open(BytesIO(svg_png)) as overlay_image:
-                rendered_overlay = ImageTk.PhotoImage(overlay_image.convert("RGBA"), master=self.root)
-        except Exception as exc:  # noqa: BLE001 -- SVG renderers can surface backend-specific exceptions.
-            messagebox.showwarning(
-                "SVG Overlay Error",
-                f"Failed to load overlay:\n{self.overlay_path}\n\n{exc}",
-            )
+            result = QImage.fromData(png)
+            if result.isNull():
+                raise ValueError("SVG renderer produced an invalid image")
+        except Exception as exc:  # noqa: BLE001 -- renderer backend exceptions vary.
             self.overlay_path = None
             self.overlay_cache.clear()
+            QMessageBox.warning(self, "SVG Overlay Error", str(exc))
             return None
-
-        self.overlay_cache[cache_key] = rendered_overlay
+        self.overlay_cache[key] = result
         if len(self.overlay_cache) > 8:
             self.overlay_cache.popitem(last=False)
-        return rendered_overlay
+        return result
 
-    def set_overlay_line_width(self, _event: tk.Event | None = None) -> None:
-        try:
-            line_width = float(self.overlay_line_width_var.get())
-            if line_width <= 0:
-                raise ValueError
-        except ValueError:
-            self.overlay_line_width_var.set(f"{self.overlay_line_width:g}")
-            return
-
-        if line_width == self.overlay_line_width:
-            return
-        self.overlay_line_width = line_width
+    def set_overlay_line_width(self, value):
+        self.overlay_line_width = value
         self.overlay_cache.clear()
         self.update_canvas()
 
-    def toggle_svg_overlay(self) -> None:
-        """Toggle the overlay and its related controls as one UI state."""
-        state = "normal" if self.overlay_enabled.get() else "disabled"
-        self.overlay_line_width_spinbox.config(state=state)
-        self.overlay_text_size_spinbox.config(state=state)
-        self.elements_button.config(state=state)
-        self.update_canvas()
-
-    def set_overlay_text_size(self, _event: tk.Event | None = None) -> None:
-        try:
-            text_size = float(self.overlay_text_size_var.get())
-            if text_size <= 0:
-                raise ValueError
-        except ValueError:
-            self.overlay_text_size_var.set(f"{self.overlay_text_size:g}")
-            return
-
-        if text_size == self.overlay_text_size:
-            return
-        self.overlay_text_size = text_size
+    def set_overlay_text_size(self, value):
+        self.overlay_text_size = value
         self.overlay_cache.clear()
         self.update_canvas()
 
-    def update_canvas(self) -> None:
-        if self.image is None:
-            return
+    def toggle_svg_overlay(self, checked):
+        for widget in (self.overlay_line_width_spinbox, self.overlay_text_size_spinbox, self.elements_button):
+            widget.setEnabled(checked)
+        self.update_canvas()
 
-        canvas_width = max(self.canvas.winfo_width(), 1)
-        canvas_height = max(self.canvas.winfo_height(), 1)
-        fit_width, fit_height = fitted_size(self.image.size, (canvas_width, canvas_height))
-        new_width = max(1, int(fit_width * self.zoom_factor))
-        new_height = max(1, int(fit_height * self.zoom_factor))
-
-        center_x = self.offset_x + canvas_width // 2
-        center_y = self.offset_y + canvas_height // 2
-        anchor = next((a for a in self.anchors if a.key == self.anchor_key), None)
-        if anchor is not None:
-            center_x += (0.5 - anchor.x) * new_width
-            center_y += (0.5 - anchor.y) * new_height
-            self.anchor_status.set(f"Locked: {anchor.label} — drag to reposition")
-        elif self.anchor_key is not None:
-            self.anchor_status.set("Anchor missing — playback stopped; showing centered image")
-            self.stop_playback()
-        else:
-            self.anchor_status.set("Anchor off")
-
-        self.canvas.delete("all")
-        left = round(center_x) - new_width // 2
-        top = round(center_y) - new_height // 2
-        self.image_bounds = (left, top, new_width, new_height)
-        self.inspect_pixel()
-        crop = (max(0, -left), max(0, -top),
-                min(new_width, canvas_width - left), min(new_height, canvas_height - top))
-        x0, y0, x1, y1 = crop
-        if x1 > x0 and y1 > y0:
-            cache_key = (new_width, new_height, *crop)
-            if self.rendered_image_cache is None or self.rendered_image_cache[0] != cache_key:
-                source_box = (x0 * self.image.width / new_width, y0 * self.image.height / new_height,
-                              x1 * self.image.width / new_width, y1 * self.image.height / new_height)
-                resized_image = self.image.resize((x1 - x0, y1 - y0), Image.Resampling.NEAREST, box=source_box)
-                self.rendered_image_cache = (cache_key, ImageTk.PhotoImage(resized_image, master=self.root))
-            self.photo = self.rendered_image_cache[1]
-            self.canvas.create_image(left + x0, top + y0, image=self.photo, anchor=tk.NW)
-            if self.overlay_enabled.get():
-                rendered_overlay = self._get_rendered_overlay((new_width, new_height), crop)
-                if rendered_overlay is not None:
-                    self.canvas.create_image(left + x0, top + y0, image=rendered_overlay, anchor=tk.NW)
-
-        if self.anchor_preview is not None:
-            x = center_x + (self.anchor_preview.x - 0.5) * new_width
-            y = center_y + (self.anchor_preview.y - 0.5) * new_height
-            self.canvas.create_oval(x - 8, y - 8, x + 8, y + 8, outline="yellow", width=2)
-            self.canvas.create_line(x - 14, y, x + 14, y, fill="yellow")
-            self.canvas.create_line(x, y - 14, x, y + 14, fill="yellow")
-
-        for left, top, right, bottom in self.element_previews:
-            x1 = center_x + (left - 0.5) * new_width
-            y1 = center_y + (top - 0.5) * new_height
-            x2 = center_x + (right - 0.5) * new_width
-            y2 = center_y + (bottom - 0.5) * new_height
-            x, y = (x1 + x2) / 2, (y1 + y2) / 2
-            self.canvas.create_rectangle(x1 - 3, y1 - 3, x2 + 3, y2 + 3, outline="yellow", width=2)
-            self.canvas.create_oval(x - 8, y - 8, x + 8, y + 8, outline="yellow", width=2)
-            self.canvas.create_line(x - 14, y, x + 14, y, fill="yellow")
-            self.canvas.create_line(x, y - 14, x, y + 14, fill="yellow")
-
-        if self.images[self.current_index] in self.classified_map:
-            self.canvas.create_rectangle(
-                center_x - new_width // 2,
-                center_y - new_height // 2,
-                center_x + new_width // 2,
-                center_y + new_height // 2,
-                outline="green",
-                width=3,
-            )
-
-    def zoom_image(self, event: tk.Event) -> None:
+    def zoom_image(self, event):
         if self.image is None:
             return
         old_bounds = self.image_bounds
-        zoom_in = getattr(event, "delta", 0) > 0 or getattr(event, "num", None) == 4
-        self.zoom_factor *= 1.1 if zoom_in else 1 / 1.1
-        self.zoom_factor = min(max(self.zoom_factor, 0.1), 20.0)
+        self.zoom_factor = min(20.0, max(0.1, self.zoom_factor * (1.1 if event.delta > 0 else 1 / 1.1)))
         if old_bounds is not None:
             old_left, old_top, old_width, old_height = old_bounds
-            canvas_width = max(self.canvas.winfo_width(), 1)
-            canvas_height = max(self.canvas.winfo_height(), 1)
-            fit_width, fit_height = fitted_size(self.image.size, (canvas_width, canvas_height))
-            width = max(1, int(fit_width * self.zoom_factor))
-            height = max(1, int(fit_height * self.zoom_factor))
-            anchor = next((a for a in self.anchors if a.key == self.anchor_key), None)
-            center_x = self.offset_x + canvas_width // 2
-            center_y = self.offset_y + canvas_height // 2
-            if anchor is not None:
-                center_x += (0.5 - anchor.x) * width
-                center_y += (0.5 - anchor.y) * height
-            left, top = round(center_x) - width // 2, round(center_y) - height // 2
+            left, top, width, height = self._view_bounds()
             self.offset_x += event.x - (left + (event.x - old_left) * width / old_width)
             self.offset_y += event.y - (top + (event.y - old_top) * height / old_height)
         self.update_canvas()
 
-    def start_pan(self, event: tk.Event) -> None:
-        self.start_x = event.x
-        self.start_y = event.y
+    def start_pan(self, event):
+        self.start_x, self.start_y = event.x, event.y
 
-    def pan_image(self, event: tk.Event) -> None:
-        delta_x = event.x - self.start_x
-        delta_y = event.y - self.start_y
-        self.offset_x += delta_x
-        self.offset_y += delta_y
-        self.start_x = event.x
-        self.start_y = event.y
+    def pan_image(self, event):
+        self.offset_x += event.x - self.start_x
+        self.offset_y += event.y - self.start_y
+        self.start_x, self.start_y = event.x, event.y
         self.update_canvas()
         self.inspect_pixel(event)
 
-    def clear_pixel(self, _event: tk.Event | None = None) -> None:
+    def clear_pixel(self):
         self.pixel_pointer = None
-        self.pixel_status.set("Hover over the image to inspect pixels")
+        self.pixel_status.setText("Hover over the image to inspect pixels")
 
-    def inspect_pixel(self, event: tk.Event | None = None) -> None:
+    def inspect_pixel(self, event=None):
         if event is not None:
             self.pixel_pointer = (event.x, event.y)
-        self.pixel_status.set("Hover over the image to inspect pixels")
+        self.pixel_status.setText("Hover over the image to inspect pixels")
         if self.image is None or self.image_bounds is None or self.pixel_pointer is None:
             return
         left, top, width, height = self.image_bounds
         x, y = self.pixel_pointer
         if not (left <= x < left + width and top <= y < top + height):
             return
-        px = int((x - left) * self.image.width / width)
-        py = int((y - top) * self.image.height / height)
+        px, py = int((x - left) * self.image.width / width), int((y - top) * self.image.height / height)
         value = self.image.getpixel((px, py))
         label = {"L": "Gray", "LA": "Gray+A", "1": "B/W", "P": "Index"}.get(self.image.mode, self.image.mode)
-        self.pixel_status.set(f"({px}, {py}) · {label}: {value}")
+        self.pixel_status.setText(f"({px}, {py}) · {label}: {value}")
 
-    def show_next_image(self) -> None:
+    def show_next_image(self):
+        if self.transfer_future is not None:
+            return
         self.stop_playback()
         if self.images and self.current_index < len(self.images) - 1:
             self.current_index += 1
             self.show_image()
 
-    def show_previous_image(self) -> None:
+    def show_previous_image(self):
+        if self.transfer_future is not None:
+            return
         self.stop_playback()
         if self.images and self.current_index > 0:
             self.current_index -= 1
             self.show_image()
 
-    def reset_view(self) -> None:
-        if self.anchor_key is not None:
-            return
-        self.zoom_factor = 1.0
-        self.offset_x = 0
-        self.offset_y = 0
+    def reset_view(self):
+        if self.anchor_key is None:
+            self.zoom_factor = 1.0
+            self.offset_x = self.offset_y = 0.0
 
-    def fit_image_to_window(self, _event: tk.Event | None = None) -> None:
-        """Reset zoom and pan so the image fits inside the canvas."""
+    def unlock_anchor(self):
+        self.anchor_key = self.anchor_preview = None
+        self.reset_view()
+        self.update_canvas()
+
+    def fit_image_to_window(self):
         self.unlock_anchor()
 
-    def define_classes(self) -> None:
-        class_window = tk.Toplevel(self.root)
-        class_window.title("Define Classifications")
-        class_window.transient(self.root)
-        class_window.grab_set()
-        class_window.resizable(False, False)
+    def lock_anchor(self, anchor):
+        if self.image_bounds is not None:
+            left, top, width, height = self.image_bounds
+            self.offset_x = left + anchor.x * width - self.canvas.width() // 2
+            self.offset_y = top + anchor.y * height - self.canvas.height() // 2
+        else:
+            self.offset_x = self.offset_y = 0
+        self.anchor_key = anchor.key
+        self.update_canvas()
 
-        entries: list[ttk.Entry] = []
-        ttk.Label(class_window, text=f"Enter class names (up to {MAX_CLASSES}):").pack(pady=(10, 5))
+    def select_anchor(self):
+        self.stop_playback()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Select SVG Anchor")
+        dialog.resize(530, 320)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Select a point or endpoint to highlight it in the image."))
+        tree = QTreeWidget()
+        tree.setHeaderLabels(["Element / anchor", "Image X (%)", "Image Y (%)"])
+        for index, anchor in enumerate(self.anchors):
+            item = QTreeWidgetItem([anchor.label, f"{anchor.x * 100:.3f}", f"{anchor.y * 100:.3f}"])
+            item.setData(0, Qt.ItemDataRole.UserRole, index)
+            tree.addTopLevelItem(item)
+        layout.addWidget(tree)
+        if not self.anchors:
+            layout.addWidget(QLabel("No supported, identified anchors inside this SVG viewBox."))
 
+        def preview():
+            selected = tree.currentItem()
+            self.anchor_preview = self.anchors[selected.data(0, Qt.ItemDataRole.UserRole)] if selected else None
+            self.update_canvas()
+
+        tree.itemSelectionChanged.connect(preview)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Lock anchor")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted and self.anchor_preview is not None:
+            self.lock_anchor(self.anchor_preview)
+        self.anchor_preview = None
+        self.update_canvas()
+        dialog.deleteLater()
+
+    def select_svg_elements(self):
+        self.stop_playback()
+        if self.overlay_path is None:
+            QMessageBox.information(self, "SVG Elements", "The current image has no SVG overlay.")
+            return
+        try:
+            viewport = _svg_viewport_size(ElementTree.parse(self.overlay_path).getroot())
+            if viewport is None:
+                raise ValueError("The SVG has no usable viewport.")
+            scale = 1024 / max(viewport)
+            size = (max(1, round(viewport[0] * scale)), max(1, round(viewport[1] * scale)))
+            elements = visible_svg_graphics(self.overlay_path, size, self.overlay_line_width, self.overlay_text_size)
+        except Exception as exc:  # noqa: BLE001 -- renderer backend exceptions vary.
+            QMessageBox.warning(self, "SVG Elements", str(exc))
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("SVG element visibility")
+        dialog.resize(650, 400)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Select an element to highlight its location in the image."))
+        tree = QTreeWidget()
+        tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        tree.setHeaderLabels(["Graphic element", "Image X (%)", "Image Y (%)", "Visible"])
+        for index, (key, label, bounds) in enumerate(elements):
+            left, top, right, bottom = bounds
+            item = QTreeWidgetItem(
+                [
+                    label,
+                    f"{(left + right) * 50:.3f}",
+                    f"{(top + bottom) * 50:.3f}",
+                    "No" if key in self.hidden_svg_elements else "Yes",
+                ]
+            )
+            item.setData(0, Qt.ItemDataRole.UserRole, index)
+            tree.addTopLevelItem(item)
+        layout.addWidget(tree)
+
+        def preview():
+            self.element_previews = [
+                elements[item.data(0, Qt.ItemDataRole.UserRole)][2] for item in tree.selectedItems()
+            ]
+            self.update_canvas()
+
+        def change(visible, all_elements=False):
+            items = (
+                [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
+                if all_elements
+                else tree.selectedItems()
+            )
+            for item in items:
+                key = elements[item.data(0, Qt.ItemDataRole.UserRole)][0]
+                if visible:
+                    self.hidden_svg_elements.discard(key)
+                else:
+                    self.hidden_svg_elements.add(key)
+                item.setText(3, "Yes" if visible else "No")
+            self.overlay_cache.clear()
+            self.update_canvas()
+
+        tree.itemSelectionChanged.connect(preview)
+        buttons = QHBoxLayout()
+        self._button(buttons, "Show selected", lambda: change(True))
+        self._button(buttons, "Hide selected", lambda: change(False))
+        self._button(buttons, "Show all", lambda: change(True, True))
+        self._button(buttons, "Close", dialog.accept)
+        layout.addLayout(buttons)
+        dialog.exec()
+        self.element_previews = []
+        self.update_canvas()
+        dialog.deleteLater()
+
+    def define_classes(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Define Classifications")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(f"Enter class names (up to {MAX_CLASSES}):"))
+        entries = []
         for index in range(MAX_CLASSES):
-            entry = ttk.Entry(class_window, width=30)
-            entry.pack(padx=10, pady=2)
-            if index < len(self.classifications):
-                entry.insert(0, self.classifications[index])
+            entry = QLineEdit(self.classifications[index] if index < len(self.classifications) else "")
+            layout.addWidget(entry)
             entries.append(entry)
 
-        def save_classes(_event: tk.Event | None = None) -> None:
-            class_names = [entry.get().strip() for entry in entries if entry.get().strip()]
-            if len(set(class_names)) != len(class_names):
-                messagebox.showwarning(
-                    "Duplicate Classes", "Each classification name must be unique.", parent=class_window
-                )
+        def save():
+            names = [entry.text().strip() for entry in entries if entry.text().strip()]
+            if len(set(names)) != len(names):
+                QMessageBox.warning(dialog, "Duplicate Classes", "Each classification name must be unique.")
                 return
-
-            self.classifications = class_names
-            class_window.destroy()
+            self.classifications = names
             self.create_classification_buttons()
+            dialog.accept()
 
-        button_frame = ttk.Frame(class_window)
-        button_frame.pack(pady=10)
-        ttk.Button(button_frame, text="Save", command=save_classes).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_frame, text="Cancel", command=class_window.destroy).pack(side=tk.LEFT, padx=5)
-        class_window.bind("<Return>", save_classes)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setDefault(True)
+        buttons.accepted.connect(save)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        entries[0].setFocus()
+        dialog.exec()
+        dialog.deleteLater()
 
-        class_window.update_idletasks()
-        x = self.root.winfo_rootx() + (self.root.winfo_width() - class_window.winfo_width()) // 2
-        y = self.root.winfo_rooty() + (self.root.winfo_height() - class_window.winfo_height()) // 2
-        class_window.geometry(f"+{x}+{y}")
-        entries[0].focus_set()
-
-    def create_classification_buttons(self) -> None:
-        for widget in self.classification_frame.winfo_children():
-            widget.destroy()
-        for index in range(1, 10):
-            self.root.unbind(str(index))
-
-        for index, class_name in enumerate(self.classifications, start=1):
-            button = ttk.Button(
-                self.classification_frame,
-                text=f"{index}: {class_name}",
-                command=lambda name=class_name: self.classify_image(name),
+    def create_classification_buttons(self):
+        while self.classification_layout.count():
+            widget = self.classification_layout.takeAt(0).widget()
+            if widget:
+                widget.hide()
+                widget.deleteLater()
+        for shortcut in self.class_shortcuts:
+            shortcut.setEnabled(False)
+            shortcut.deleteLater()
+        self.class_shortcuts.clear()
+        self.classification_layout.addStretch()
+        for index, name in enumerate(self.classifications, 1):
+            self._button(
+                self.classification_layout,
+                f"{index}: {name}",
+                lambda checked=False, name=name: self.classify_image(name),
             )
-            button.pack(side=tk.LEFT, padx=5, pady=5)
             if index <= 9:
-                self.root.bind(str(index), lambda event, name=class_name: self._classification_shortcut(event, name))
-
-        self.btn_remove_classification = ttk.Button(
-            self.classification_frame,
-            text="Remove Classification",
-            command=self.remove_classification,
+                shortcut = QShortcut(QKeySequence(str(index)), self)
+                shortcut.activated.connect(lambda name=name: self._classification_shortcut(name))
+                self.class_shortcuts.append(shortcut)
+        self.btn_remove_classification = self._button(
+            self.classification_layout, "Remove Classification", self.remove_classification
         )
-        self.btn_remove_classification.pack(side=tk.LEFT, padx=20)
+        self.classification_layout.addStretch()
 
-    def classify_image(self, class_name: str) -> None:
-        if not self.images:
+    def _classification_shortcut(self, class_name):
+        if not self._editing():
+            self.classify_image(class_name)
+
+    def classify_image(self, class_name):
+        if not self.images or self.transfer_future is not None:
             return
-
         self.stop_playback()
         self.classified_map[self.images[self.current_index]] = class_name
-
         if self.current_index < len(self.images) - 1:
             self.current_index += 1
         self.reset_view()
         self.show_image()
 
-    def _classification_shortcut(self, event: tk.Event, class_name: str) -> None:
-        """Classify only when a number key was not typed into an input control."""
-        if isinstance(event.widget, (tk.Entry, tk.Spinbox, ttk.Entry, ttk.Spinbox)):
-            return
-        self.classify_image(class_name)
+    def remove_classification(self):
+        if self.images and self.transfer_future is None:
+            self.classified_map.pop(self.images[self.current_index], None)
+            self.show_image()
 
-    def _update_transfer_button(self, _event: tk.Event | None = None) -> None:
-        self.transfer_button.config(text=f"{self.transfer_mode.get()} Classified")
+    def _update_transfer_button(self):
+        self.transfer_button.setText(f"{self.transfer_mode_selector.currentText()} Classified")
 
-    def toggle_image_details(self) -> None:
-        """Show or hide the persistent image metadata inspector."""
+    def toggle_image_details(self):
         self.details_visible = not self.details_visible
+        self.details_frame.setVisible(self.details_visible)
         if self.details_visible:
-            self.content_pane.add(self.details_frame, weight=2)
-            self.details_button.config(text="Hide Details")
-            if self.folder_path is not None and self.images:
-                self._update_image_details(self.folder_path / self.images[self.current_index])
-        else:
-            self.content_pane.forget(self.details_frame)
-            self.details_button.config(text="Show Details")
-        self.root.after_idle(self.update_canvas)
+            total_width = self.content_pane.width()
+            self.content_pane.setSizes([total_width * 2 // 3, total_width // 3])
+        self.details_button.setText("Hide Details" if self.details_visible else "Show Details")
+        if self.details_visible and self.folder_path is not None and self.images:
+            self._update_image_details(self.folder_path / self.images[self.current_index])
+        QTimer.singleShot(0, self.update_canvas)
 
-    def _clear_image_details(self) -> None:
-        self.details_tree.delete(*self.details_tree.get_children())
-
-    def _update_image_details(self, image_path: Path) -> None:
+    def _update_image_details(self, path):
         if not self.details_visible:
             return
-        self._clear_image_details()
+        self.details_tree.clear()
         try:
-            sections = image_metadata(image_path, self.overlay_path)
+            sections = image_metadata(path, self.overlay_path)
         except (OSError, ValueError) as exc:
-            self.details_tree.insert("", tk.END, text="Metadata unavailable", values=(str(exc),))
+            self.details_tree.addTopLevelItem(QTreeWidgetItem(["Metadata unavailable", str(exc)]))
             return
-
         for section, details in sections:
-            parent = self.details_tree.insert("", tk.END, text=section, open=True)
+            parent = QTreeWidgetItem([section])
+            self.details_tree.addTopLevelItem(parent)
             for name, value in details:
-                self.details_tree.insert(parent, tk.END, text=name, values=(value,))
+                parent.addChild(QTreeWidgetItem([name, str(value)]))
+            parent.setExpanded(True)
 
-    def copy_selected_detail(self) -> None:
-        selection = self.details_tree.selection()
-        if not selection:
-            return
-        values = self.details_tree.item(selection[0], "values")
-        if not values:
-            return
-        self.root.clipboard_clear()
-        self.root.clipboard_append(values[0])
+    def copy_selected_detail(self):
+        item = self.details_tree.currentItem()
+        if item and item.text(1):
+            QApplication.clipboard().setText(item.text(1))
 
-    def remove_classification(self) -> None:
-        if not self.images:
-            return
-        self.classified_map.pop(self.images[self.current_index], None)
-        self.show_image()
-
-    def move_classified_images(self) -> None:
+    def move_classified_images(self):
         if self.transfer_future is not None:
             return
         if not self.classified_map or self.folder_path is None:
-            messagebox.showinfo("No Classifications", "No images have been classified yet.")
+            QMessageBox.information(self, "No Classifications", "No images have been classified yet.")
             return
-
-        operation = self.transfer_mode.get()
-        copying = operation == "Copy"
-        if not messagebox.askyesno(
-            f"{operation} Images",
-            f"{operation} {len(self.classified_map)} classified image(s) into class subfolders?",
+        operation = self.transfer_mode_selector.currentText()
+        if (
+            QMessageBox.question(
+                self,
+                f"{operation} Images",
+                f"{operation} {len(self.classified_map)} classified image(s) into class subfolders?",
+            )
+            != QMessageBox.StandardButton.Yes
         ):
             return
-
         self.stop_playback()
-        self._clear_prefetch(wait=True)
-        if not copying:
-            self._clear_image_display()
-
-        self.transfer_progress.config(maximum=len(self.classified_map), value=0)
-        self.transfer_progress.pack(fill=tk.X, padx=10, pady=(0, 5))
-        self.root.update_idletasks()
-
-        self.transfer_button.config(state=tk.DISABLED)
-        self.transfer_mode_selector.config(state=tk.DISABLED)
+        pending = list(self.prefetched_images.values())
+        self._clear_prefetch()
         self.transfer_folder = self.folder_path
         self.transfer_operation = operation
-        self.transfer_future = self.transfer_executor.submit(
-            transfer_classified_files,
-            self.transfer_folder,
-            list(self.classified_map.items()),
-            copying=copying,
-            progress_callback=self.transfer_updates.put,
-        )
-        self.root.after(50, self._poll_transfer)
+        self.transfer_progress.setRange(0, len(self.classified_map))
+        self.transfer_progress.setValue(0)
+        self.transfer_progress.show()
+        for widget in (self.transfer_button, self.transfer_mode_selector, self.select_folder_button, self.canvas):
+            widget.setEnabled(False)
+        if operation == "Move":
+            self._clear_image_display()
+        items = list(self.classified_map.items())
+        folder = self.transfer_folder
 
-    def _poll_transfer(self) -> None:
+        def transfer():
+            # Wait for in-flight reads off the UI thread before moving source files.
+            for future in pending:
+                if not future.cancelled():
+                    try:
+                        future.result()
+                    except (OSError, ValueError):
+                        pass
+            return transfer_classified_files(
+                folder, items, copying=operation == "Copy", progress_callback=self.transfer_updates.put
+            )
+
+        self.transfer_future = self.transfer_executor.submit(transfer)
+        self.transfer_timer.start()
+
+    def _poll_transfer(self):
         future = self.transfer_future
         if future is None:
             return
         try:
             while True:
-                self.transfer_progress.config(value=self.transfer_updates.get_nowait())
+                self.transfer_progress.setValue(self.transfer_updates.get_nowait())
         except Empty:
             pass
-
         if not future.done():
-            self.root.after(50, self._poll_transfer)
             return
-
-        completed_count, failures = future.result()
-        operation = self.transfer_operation
-        copying = operation == "Copy"
-        transfer_folder = self.transfer_folder
+        try:
+            completed, failures = future.result()
+        except Exception as exc:  # noqa: BLE001 -- restore UI after worker failures.
+            completed, failures = 0, [str(exc)]
+        self.transfer_timer.stop()
         self.transfer_future = None
-        self.transfer_folder = None
-        self.transfer_progress.pack_forget()
-        self.transfer_button.config(state=tk.NORMAL)
-        self.transfer_mode_selector.config(state="readonly")
-
-        if not copying and self.folder_path == transfer_folder:
+        self.transfer_progress.hide()
+        for widget in (self.transfer_button, self.transfer_mode_selector, self.select_folder_button, self.canvas):
+            widget.setEnabled(True)
+        if self.transfer_operation == "Move" and self.folder_path == self.transfer_folder:
             self.load_images()
             self.show_image()
-
-        action = "copied" if copying else "moved"
-        message = f"{completed_count} image(s) {action}."
+        action = "copied" if self.transfer_operation == "Copy" else "moved"
+        message = f"{completed} image(s) {action}."
         if failures:
             message += f"\n\nNot {action}:\n" + "\n".join(failures[:10])
             if len(failures) > 10:
                 message += f"\n...and {len(failures) - 10} more."
-            messagebox.showwarning(f"{operation} Complete", message)
-        else:
-            messagebox.showinfo(f"{operation} Complete", message)
+        (QMessageBox.warning if failures else QMessageBox.information)(
+            self, f"{self.transfer_operation} Complete", message
+        )
+        self.transfer_folder = None
 
-    def jump_to_index(self, _event: tk.Event | None = None) -> None:
+    def jump_to_index(self):
+        if self.transfer_future is not None:
+            return
         try:
-            new_index = int(self.index_var.get()) - 1
-            if not 0 <= new_index < len(self.images):
+            index = int(self.index_entry.text()) - 1
+            if not 0 <= index < len(self.images):
                 raise ValueError
         except ValueError:
-            messagebox.showwarning("Invalid Index", f"Please enter a number between 1 and {len(self.images)}.")
-            self.index_var.set(str(self.current_index + 1 if self.images else 0))
+            QMessageBox.warning(self, "Invalid Index", f"Please enter a number between 1 and {len(self.images)}.")
+            self.index_entry.setText(str(self.current_index + 1 if self.images else 0))
             return
-
         self.stop_playback()
-        self.current_index = new_index
+        self.current_index = index
         self.reset_view()
         self.show_image()
 
-    def toggle_play(self) -> None:
+    def toggle_play(self):
+        if self.transfer_future is not None:
+            return
         if self.is_playing:
             self.stop_playback()
-            return
+        elif self.images:
+            self.play_delay_ms = self.delay_entry.value()
+            self.is_playing = True
+            self.play_button.setText("Stop")
+            self.play_images()
 
-        try:
-            self.play_delay_ms = max(MIN_PLAY_DELAY_MS, int(self.delay_entry.get()))
-        except ValueError:
-            messagebox.showerror("Invalid Input", "Delay must be an integer in milliseconds.")
-            return
-
-        if not self.images:
-            return
-
-        self.is_playing = True
-        self.play_button.config(text="Stop")
-        self.play_images()
-
-    def play_images(self) -> None:
+    def play_images(self):
         if not self.is_playing:
             return
-
         if self.current_index < len(self.images) - 1:
             self.current_index += 1
             self.show_image()
             if self.is_playing:
-                self.play_after_id = self.root.after(self.play_delay_ms, self.play_images)
+                self.play_timer.start(self.play_delay_ms)
         else:
             self.stop_playback()
 
-    def stop_playback(self) -> None:
+    def stop_playback(self):
         self.is_playing = False
-        self.play_button.config(text="Play")
-        if self.play_after_id is not None:
-            self.root.after_cancel(self.play_after_id)
-            self.play_after_id = None
+        self.play_timer.stop()
+        self.play_button.setText("Play")
 
-    def close(self) -> None:
+    def closeEvent(self, event):
         self.stop_playback()
+        self.transfer_timer.stop()
         self._clear_prefetch()
         self.image_loader.shutdown(wait=False, cancel_futures=True)
-        self.transfer_executor.shutdown(wait=False, cancel_futures=True)
-        self.root.destroy()
+        self.transfer_executor.shutdown(wait=False)
+        event.accept()

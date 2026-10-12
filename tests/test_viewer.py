@@ -7,7 +7,7 @@ import pytest
 import resvg_py
 from PIL import Image
 
-from classify_image.app import ImageClassifierApp, svg_graphics, svg_with_line_width, visible_svg_graphics
+from classify_image.app import svg_graphics, svg_with_line_width, visible_svg_graphics
 
 
 def test_hidden_graphics_render_without_changing_source_or_definitions(tmp_path):
@@ -36,25 +36,21 @@ def test_hidden_graphics_render_without_changing_source_or_definitions(tmp_path)
         ("P", 7, "Index"),
     ],
 )
-def test_pixel_values_use_original_image_and_transformed_bounds(mode, value, label):
-    app = ImageClassifierApp.__new__(ImageClassifierApp)
+def test_pixel_values_use_original_image_and_transformed_bounds(app, mode, value, label):
     app.image = Image.new(mode, (4, 2))
     app.image.putpixel((2, 1), value)
     app.image_bounds = (-10, 20, 40, 20)
-    app.pixel_status = Mock()
     app.inspect_pixel(SimpleNamespace(x=15, y=35))
-    assert app.pixel_status.set.call_args.args[0] == f"(2, 1) · {label}: {value}"
+    assert app.pixel_status.text() == f"(2, 1) · {label}: {value}"
     app.inspect_pixel(SimpleNamespace(x=30, y=35))
-    assert app.pixel_status.set.call_args.args[0] == "Hover over the image to inspect pixels"
+    assert app.pixel_status.text() == "Hover over the image to inspect pixels"
     app.clear_pixel()
     assert app.pixel_pointer is None
 
 
-def test_lock_anchor_keeps_current_position():
-    app = ImageClassifierApp.__new__(ImageClassifierApp)
-    app.canvas = Mock()
-    app.canvas.winfo_width.return_value = 800
-    app.canvas.winfo_height.return_value = 600
+def test_lock_anchor_keeps_current_position(app):
+    app.canvas.resize(800, 600)
+    app.update_canvas = Mock()
     app.image_bounds = (-100, 50, 1200, 800)
     anchor = SimpleNamespace(key="point", x=0.25, y=0.75)
     app.lock_anchor(anchor)
@@ -109,9 +105,7 @@ def test_visibility_list_keeps_use_references_to_graphics_outside_defs(tmp_path)
     assert rows[0][2] == (0.2, 0.2, 0.3, 0.3)
 
 
-def test_playback_preserves_user_view_without_anchor():
-    app = ImageClassifierApp.__new__(ImageClassifierApp)
-    app.root = Mock()
+def test_playback_preserves_user_view_without_anchor(app):
     app.is_playing = True
     app.images = ["first.png", "second.png"]
     app.current_index = 0
@@ -124,19 +118,17 @@ def test_playback_preserves_user_view_without_anchor():
     assert app.current_index == 1
     assert (app.zoom_factor, app.offset_x, app.offset_y) == (3.5, 100, -50)
     app.show_image.assert_called_once()
-    app.root.after.assert_called_once_with(125, app.play_images)
+    assert app.play_timer.isActive()
+    assert app.play_timer.interval() == 125
 
 
 @pytest.mark.parametrize(
     "method, start_index, expected_index",
     [("show_next_image", 0, 1), ("show_previous_image", 1, 0)],
 )
-def test_manual_navigation_preserves_user_view(method, start_index, expected_index):
-    app = ImageClassifierApp.__new__(ImageClassifierApp)
-    app.root = Mock()
-    app.play_button = Mock()
+def test_manual_navigation_preserves_user_view(app, method, start_index, expected_index):
     app.is_playing = True
-    app.play_after_id = "pending-playback"
+    app.play_timer.start(1000)
     app.images = ["first.png", "second.png"]
     app.current_index = start_index
     app.anchor_key = None
@@ -150,77 +142,55 @@ def test_manual_navigation_preserves_user_view(method, start_index, expected_ind
     assert (app.zoom_factor, app.offset_x, app.offset_y) == (3.5, 100, -50)
     app.show_image.assert_called_once_with()
     assert not app.is_playing
-    assert app.play_after_id is None
-    app.root.after_cancel.assert_called_once_with("pending-playback")
+    assert not app.play_timer.isActive()
 
 
-def test_pan_updates_pixel_mapping():
-    app = ImageClassifierApp.__new__(ImageClassifierApp)
+def test_pan_updates_pixel_mapping(app):
     app.image = Image.new("L", (10, 10), 42)
     app.image_bounds = (0, 0, 100, 100)
     app.start_x = app.start_y = app.offset_x = app.offset_y = 0
-    app.canvas = Mock()
-    app.pixel_status = Mock()
+
     def redraw():
         app.image_bounds = (app.offset_x, app.offset_y, 100, 100)
+
     app.update_canvas = Mock(side_effect=redraw)
     app.pan_image(SimpleNamespace(x=25, y=30))
     assert app.image_bounds == (25, 30, 100, 100)
-    assert app.pixel_status.set.call_args.args[0] == "(0, 0) · Gray: 42"
+    assert app.pixel_status.text() == "(0, 0) · Gray: 42"
 
 
-def viewport_app():
-    app = ImageClassifierApp.__new__(ImageClassifierApp)
-    app.root = Mock()
-    app.canvas = Mock()
-    app.canvas.winfo_width.return_value = 100
-    app.canvas.winfo_height.return_value = 100
+def configure_viewport(app):
+    app.canvas.resize(100, 100)
     app.image = Image.new("RGB", (10, 10))
     app.zoom_factor = 10
-    app.offset_x = app.offset_y = 0
-    app.anchors = []
-    app.anchor_key = None
-    app.anchor_status = Mock()
-    app.anchor_preview = None
-    app.element_previews = []
+    app.overlay_enabled.setChecked(False)
     app.rendered_image_cache = None
-    app.overlay_enabled = Mock()
-    app.overlay_enabled.get.return_value = False
-    app.inspect_pixel = Mock()
     app.images = ["first.png"]
-    app.current_index = 0
-    app.classified_map = {}
     return app
 
 
-def test_high_zoom_only_renders_viewport_and_pan_reveals_pixels(monkeypatch):
-    app = viewport_app()
-    photos = []
-    def photo(image, **kwargs):
-        photos.append(image.copy())
-        return Mock()
-    monkeypatch.setattr("classify_image.app.ImageTk.PhotoImage", photo)
+def test_high_zoom_only_renders_viewport_and_pan_reveals_pixels(app):
+    configure_viewport(app)
     app.image.putpixel((4, 4), (255, 0, 0))
     app.update_canvas()
     assert app.image_bounds == (-450, -450, 1000, 1000)
-    assert photos[-1].size == (100, 100)
-    assert photos[-1].getpixel((0, 0)) == (255, 0, 0)
+    assert (app.photo.width(), app.photo.height()) == (100, 100)
+    assert app.photo.pixelColor(0, 0).getRgb()[:3] == (255, 0, 0)
     app.start_x = app.start_y = 0
     app.pan_image(SimpleNamespace(x=100, y=0))
-    assert photos[-1].size == (100, 100)
-    assert photos[-1].getpixel((0, 0)) == (0, 0, 0)
+    assert (app.photo.width(), app.photo.height()) == (100, 100)
+    assert app.photo.pixelColor(0, 0).getRgb()[:3] == (0, 0, 0)
     app.offset_x = 2000
     app.update_canvas()
-    assert len(photos) == 2
+    assert app.photo is None
 
 
 @pytest.mark.parametrize("anchor_key", [None, "locked"])
 @pytest.mark.parametrize("delta", [120, -120])
-def test_zoom_keeps_cursor_image_position(monkeypatch, anchor_key, delta):
-    app = viewport_app()
+def test_zoom_keeps_cursor_image_position(app, anchor_key, delta):
+    configure_viewport(app)
     app.anchor_key = anchor_key
     app.anchors = [SimpleNamespace(key="locked", x=0.3, y=0.7, label="Point")]
-    monkeypatch.setattr("classify_image.app.ImageTk.PhotoImage", Mock())
     app.update_canvas()
     x, y = 23, 71
     left, top, width, height = app.image_bounds
@@ -230,24 +200,19 @@ def test_zoom_keeps_cursor_image_position(monkeypatch, anchor_key, delta):
     assert ((x - left) / width, (y - top) / height) == pytest.approx(before, abs=0.001)
 
 
-def test_overlay_renders_only_crop_at_full_zoom_scale(tmp_path, monkeypatch):
+def test_overlay_renders_only_crop_at_full_zoom_scale(app, tmp_path):
     from collections import OrderedDict
 
-    app = viewport_app()
+    configure_viewport(app)
     app.overlay_path = tmp_path / "overlay.svg"
-    app.overlay_path.write_text('''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+    app.overlay_path.write_text("""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
       <rect x="4" y="4" width="1" height="1" fill="red"/>
-    </svg>''')
+    </svg>""")
     app.overlay_cache = OrderedDict()
     app.overlay_line_width = 1
     app.overlay_text_size = 12
     app.hidden_svg_elements = set()
-    photos = []
-    def photo(image, **kwargs):
-        photos.append(image.copy())
-        return Mock()
-    monkeypatch.setattr("classify_image.app.ImageTk.PhotoImage", photo)
-    app._get_rendered_overlay((1000, 1000), (450, 450, 550, 550))
-    assert photos[-1].size == (100, 100)
-    assert photos[-1].getpixel((0, 0)) == (255, 0, 0, 255)
-    assert photos[-1].getpixel((99, 99))[3] == 0
+    result = app._get_rendered_overlay((1000, 1000), (450, 450, 550, 550))
+    assert (result.width(), result.height()) == (100, 100)
+    assert result.pixelColor(0, 0).getRgb() == (255, 0, 0, 255)
+    assert result.pixelColor(99, 99).alpha() == 0

@@ -1,6 +1,6 @@
 # ClassifyImage
 
-ClassifyImage is a small desktop GUI for manually reviewing images, assigning each image to a class, and moving the classified files into corresponding subfolders.
+ClassifyImage is a PySide6 desktop GUI for manually reviewing images, assigning each image to a class, and moving the classified files into corresponding subfolders.
 
 ## Features
 
@@ -10,7 +10,7 @@ ClassifyImage is a small desktop GUI for manually reviewing images, assigning ea
 - Automatically advance after classification.
 - Navigate with the left and right arrow keys.
 - Fit each image to the viewing window by default.
-- Zoom with the mouse wheel and pan responsively by dragging, using pixel-preserving nearest-neighbor scaling.
+- Zoom around the mouse cursor and pan by dragging, using pixel-preserving nearest-neighbor scaling and viewport-only rendering.
 - Double-click the mouse wheel to reset zoom and pan and fit the image to the viewing window.
 - Automatically display an optional same-named SVG overlay (for example, `photo.svg` over `photo.png`).
 - Show or hide individual SVG graphics with **Elements…**; selections carry across matching overlays.
@@ -29,7 +29,7 @@ ClassifyImage is a small desktop GUI for manually reviewing images, assigning ea
 ## Requirements
 
 - Python 3.10 or newer
-- Tkinter, normally included with the Windows Python installer
+- PySide6 (installed automatically with the project)
 
 SVG rendering is provided by a bundled Python wheel and does not require a separate Cairo or GTK installation.
 
@@ -84,7 +84,8 @@ ClassifyImage/
 │   └── classify_image/
 │       ├── __init__.py
 │       ├── __main__.py
-│       └── app.py
+│       ├── app.py
+│       └── core.py
 ├── tests/
 │   └── test_package.py
 ├── .gitignore
