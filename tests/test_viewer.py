@@ -161,6 +161,93 @@ def test_pan_updates_pixel_mapping():
     app.start_x = app.start_y = app.offset_x = app.offset_y = 0
     app.canvas = Mock()
     app.pixel_status = Mock()
+    def redraw():
+        app.image_bounds = (app.offset_x, app.offset_y, 100, 100)
+    app.update_canvas = Mock(side_effect=redraw)
     app.pan_image(SimpleNamespace(x=25, y=30))
     assert app.image_bounds == (25, 30, 100, 100)
     assert app.pixel_status.set.call_args.args[0] == "(0, 0) · Gray: 42"
+
+
+def viewport_app():
+    app = ImageClassifierApp.__new__(ImageClassifierApp)
+    app.root = Mock()
+    app.canvas = Mock()
+    app.canvas.winfo_width.return_value = 100
+    app.canvas.winfo_height.return_value = 100
+    app.image = Image.new("RGB", (10, 10))
+    app.zoom_factor = 10
+    app.offset_x = app.offset_y = 0
+    app.anchors = []
+    app.anchor_key = None
+    app.anchor_status = Mock()
+    app.anchor_preview = None
+    app.element_previews = []
+    app.rendered_image_cache = None
+    app.overlay_enabled = Mock()
+    app.overlay_enabled.get.return_value = False
+    app.inspect_pixel = Mock()
+    app.images = ["first.png"]
+    app.current_index = 0
+    app.classified_map = {}
+    return app
+
+
+def test_high_zoom_only_renders_viewport_and_pan_reveals_pixels(monkeypatch):
+    app = viewport_app()
+    photos = []
+    def photo(image, **kwargs):
+        photos.append(image.copy())
+        return Mock()
+    monkeypatch.setattr("classify_image.app.ImageTk.PhotoImage", photo)
+    app.image.putpixel((4, 4), (255, 0, 0))
+    app.update_canvas()
+    assert app.image_bounds == (-450, -450, 1000, 1000)
+    assert photos[-1].size == (100, 100)
+    assert photos[-1].getpixel((0, 0)) == (255, 0, 0)
+    app.start_x = app.start_y = 0
+    app.pan_image(SimpleNamespace(x=100, y=0))
+    assert photos[-1].size == (100, 100)
+    assert photos[-1].getpixel((0, 0)) == (0, 0, 0)
+    app.offset_x = 2000
+    app.update_canvas()
+    assert len(photos) == 2
+
+
+@pytest.mark.parametrize("anchor_key", [None, "locked"])
+@pytest.mark.parametrize("delta", [120, -120])
+def test_zoom_keeps_cursor_image_position(monkeypatch, anchor_key, delta):
+    app = viewport_app()
+    app.anchor_key = anchor_key
+    app.anchors = [SimpleNamespace(key="locked", x=0.3, y=0.7, label="Point")]
+    monkeypatch.setattr("classify_image.app.ImageTk.PhotoImage", Mock())
+    app.update_canvas()
+    x, y = 23, 71
+    left, top, width, height = app.image_bounds
+    before = ((x - left) / width, (y - top) / height)
+    app.zoom_image(SimpleNamespace(x=x, y=y, delta=delta))
+    left, top, width, height = app.image_bounds
+    assert ((x - left) / width, (y - top) / height) == pytest.approx(before, abs=0.001)
+
+
+def test_overlay_renders_only_crop_at_full_zoom_scale(tmp_path, monkeypatch):
+    from collections import OrderedDict
+
+    app = viewport_app()
+    app.overlay_path = tmp_path / "overlay.svg"
+    app.overlay_path.write_text('''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+      <rect x="4" y="4" width="1" height="1" fill="red"/>
+    </svg>''')
+    app.overlay_cache = OrderedDict()
+    app.overlay_line_width = 1
+    app.overlay_text_size = 12
+    app.hidden_svg_elements = set()
+    photos = []
+    def photo(image, **kwargs):
+        photos.append(image.copy())
+        return Mock()
+    monkeypatch.setattr("classify_image.app.ImageTk.PhotoImage", photo)
+    app._get_rendered_overlay((1000, 1000), (450, 450, 550, 550))
+    assert photos[-1].size == (100, 100)
+    assert photos[-1].getpixel((0, 0)) == (255, 0, 0, 255)
+    assert photos[-1].getpixel((99, 99))[3] == 0

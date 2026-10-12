@@ -349,9 +349,9 @@ class ImageClassifierApp:
         self.start_y = 0
 
         self.image: Image.Image | None = None
-        self.rendered_image_cache: tuple[tuple[int, int], ImageTk.PhotoImage] | None = None
+        self.rendered_image_cache: tuple[tuple[int, ...], ImageTk.PhotoImage] | None = None
         self.overlay_path: Path | None = None
-        self.overlay_cache: OrderedDict[tuple[int, int], ImageTk.PhotoImage] = OrderedDict()
+        self.overlay_cache: OrderedDict[tuple[int, ...], ImageTk.PhotoImage] = OrderedDict()
         self.photo: ImageTk.PhotoImage | None = None
         self.overlay_enabled = tk.BooleanVar(value=True)
         self.hidden_svg_elements: set[str] = set()
@@ -821,27 +821,40 @@ class ImageClassifierApp:
         ttk.Button(buttons, text="Show all", command=lambda: change(True, all_elements=True)).pack(side=tk.LEFT, padx=4)
         ttk.Button(buttons, text="Close", command=close).pack(side=tk.LEFT, padx=4)
 
-    def _get_rendered_overlay(self, size: tuple[int, int]) -> ImageTk.PhotoImage | None:
+    def _get_rendered_overlay(
+        self, size: tuple[int, int], crop: tuple[int, int, int, int]
+    ) -> ImageTk.PhotoImage | None:
         if self.overlay_path is None:
             return None
-        if size in self.overlay_cache:
-            self.overlay_cache.move_to_end(size)
-            return self.overlay_cache[size]
+        cache_key = (*size, *crop)
+        if cache_key in self.overlay_cache:
+            self.overlay_cache.move_to_end(cache_key)
+            return self.overlay_cache[cache_key]
 
         assert self.image is not None
         try:
             import resvg_py
 
-            svg_png = resvg_py.svg_to_bytes(
-                svg_string=svg_with_line_width(
+            svg_root = ElementTree.fromstring(svg_with_line_width(
                     self.overlay_path,
                     self.overlay_line_width,
                     size,
                     self.overlay_text_size,
                     self.hidden_svg_elements,
-                ).decode("utf-8"),
-                width=size[0],
-                height=size[1],
+                ))
+            left, top, right, bottom = crop
+            svg_root.set("width", str(size[0]))
+            svg_root.set("height", str(size[1]))
+            svg_root.set("x", str(-left))
+            svg_root.set("y", str(-top))
+            viewport = ElementTree.Element("{http://www.w3.org/2000/svg}svg", {
+                "width": str(right - left), "height": str(bottom - top),
+            })
+            viewport.append(svg_root)
+            svg_png = resvg_py.svg_to_bytes(
+                svg_string=ElementTree.tostring(viewport, encoding="unicode"),
+                width=right - left,
+                height=bottom - top,
                 resources_dir=os.fspath(self.overlay_path.parent),
             )
             with Image.open(BytesIO(svg_png)) as overlay_image:
@@ -855,7 +868,7 @@ class ImageClassifierApp:
             self.overlay_cache.clear()
             return None
 
-        self.overlay_cache[size] = rendered_overlay
+        self.overlay_cache[cache_key] = rendered_overlay
         if len(self.overlay_cache) > 8:
             self.overlay_cache.popitem(last=False)
         return rendered_overlay
@@ -908,13 +921,6 @@ class ImageClassifierApp:
         new_width = max(1, int(fit_width * self.zoom_factor))
         new_height = max(1, int(fit_height * self.zoom_factor))
 
-        # Nearest-neighbor scaling keeps source pixels as hard-edged blocks.
-        render_size = (new_width, new_height)
-        if self.rendered_image_cache is None or self.rendered_image_cache[0] != render_size:
-            resized_image = self.image.resize(render_size, Image.Resampling.NEAREST)
-            self.rendered_image_cache = (render_size, ImageTk.PhotoImage(resized_image, master=self.root))
-        self.photo = self.rendered_image_cache[1]
-
         center_x = self.offset_x + canvas_width // 2
         center_y = self.offset_y + canvas_height // 2
         anchor = next((a for a in self.anchors if a.key == self.anchor_key), None)
@@ -929,14 +935,26 @@ class ImageClassifierApp:
             self.anchor_status.set("Anchor off")
 
         self.canvas.delete("all")
-        raster_item = self.canvas.create_image(center_x, center_y, image=self.photo, anchor=tk.CENTER)
-        left, top, _, _ = self.canvas.bbox(raster_item)
+        left = round(center_x) - new_width // 2
+        top = round(center_y) - new_height // 2
         self.image_bounds = (left, top, new_width, new_height)
         self.inspect_pixel()
-        if self.overlay_enabled.get():
-            rendered_overlay = self._get_rendered_overlay((new_width, new_height))
-            if rendered_overlay is not None:
-                self.canvas.create_image(center_x, center_y, image=rendered_overlay, anchor=tk.CENTER)
+        crop = (max(0, -left), max(0, -top),
+                min(new_width, canvas_width - left), min(new_height, canvas_height - top))
+        x0, y0, x1, y1 = crop
+        if x1 > x0 and y1 > y0:
+            cache_key = (new_width, new_height, *crop)
+            if self.rendered_image_cache is None or self.rendered_image_cache[0] != cache_key:
+                source_box = (x0 * self.image.width / new_width, y0 * self.image.height / new_height,
+                              x1 * self.image.width / new_width, y1 * self.image.height / new_height)
+                resized_image = self.image.resize((x1 - x0, y1 - y0), Image.Resampling.NEAREST, box=source_box)
+                self.rendered_image_cache = (cache_key, ImageTk.PhotoImage(resized_image, master=self.root))
+            self.photo = self.rendered_image_cache[1]
+            self.canvas.create_image(left + x0, top + y0, image=self.photo, anchor=tk.NW)
+            if self.overlay_enabled.get():
+                rendered_overlay = self._get_rendered_overlay((new_width, new_height), crop)
+                if rendered_overlay is not None:
+                    self.canvas.create_image(left + x0, top + y0, image=rendered_overlay, anchor=tk.NW)
 
         if self.anchor_preview is not None:
             x = center_x + (self.anchor_preview.x - 0.5) * new_width
@@ -967,9 +985,28 @@ class ImageClassifierApp:
             )
 
     def zoom_image(self, event: tk.Event) -> None:
+        if self.image is None:
+            return
+        old_bounds = self.image_bounds
         zoom_in = getattr(event, "delta", 0) > 0 or getattr(event, "num", None) == 4
         self.zoom_factor *= 1.1 if zoom_in else 1 / 1.1
         self.zoom_factor = min(max(self.zoom_factor, 0.1), 20.0)
+        if old_bounds is not None:
+            old_left, old_top, old_width, old_height = old_bounds
+            canvas_width = max(self.canvas.winfo_width(), 1)
+            canvas_height = max(self.canvas.winfo_height(), 1)
+            fit_width, fit_height = fitted_size(self.image.size, (canvas_width, canvas_height))
+            width = max(1, int(fit_width * self.zoom_factor))
+            height = max(1, int(fit_height * self.zoom_factor))
+            anchor = next((a for a in self.anchors if a.key == self.anchor_key), None)
+            center_x = self.offset_x + canvas_width // 2
+            center_y = self.offset_y + canvas_height // 2
+            if anchor is not None:
+                center_x += (0.5 - anchor.x) * width
+                center_y += (0.5 - anchor.y) * height
+            left, top = round(center_x) - width // 2, round(center_y) - height // 2
+            self.offset_x += event.x - (left + (event.x - old_left) * width / old_width)
+            self.offset_y += event.y - (top + (event.y - old_top) * height / old_height)
         self.update_canvas()
 
     def start_pan(self, event: tk.Event) -> None:
@@ -983,10 +1020,7 @@ class ImageClassifierApp:
         self.offset_y += delta_y
         self.start_x = event.x
         self.start_y = event.y
-        self.canvas.move("all", delta_x, delta_y)
-        if self.image_bounds is not None:
-            left, top, width, height = self.image_bounds
-            self.image_bounds = (left + delta_x, top + delta_y, width, height)
+        self.update_canvas()
         self.inspect_pixel(event)
 
     def clear_pixel(self, _event: tk.Event | None = None) -> None:
